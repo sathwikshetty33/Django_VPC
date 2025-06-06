@@ -21,7 +21,6 @@ type DeploymentResponse struct {
 func main() {
 	r := gin.Default()
 
-	// Add CORS middleware
 	r.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -56,7 +55,6 @@ func handleDeployment(c *gin.Context) {
 		return
 	}
 
-	// Validate required fields
 	if err := validateRequest(&req); err != nil {
 		c.JSON(http.StatusBadRequest, DeploymentResponse{
 			Success:   false,
@@ -66,7 +64,6 @@ func handleDeployment(c *gin.Context) {
 		return
 	}
 
-	// Start deployment process
 	deploymentService := services.NewDeploymentService()
 	
 	publicIP, err := deploymentService.Deploy(&req)
@@ -97,9 +94,6 @@ func validateRequest(req *services.DeploymentRequest) error {
 	if req.GithubToken == "" {
 		return fmt.Errorf("github_token is required")
 	}
-	// if req.ASGI != true || req.ASGI != false {
-	// 	return fmt.Errorf("asgi is required")
-	// }
 
 	return nil
 }
