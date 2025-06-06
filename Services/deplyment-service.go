@@ -16,12 +16,11 @@ type DeploymentService struct{}
 
 type DeploymentRequest struct {
 	RepoURL           string            `json:"repo_url"`
-	ReqPath           string            `json:"req_path"`
-	ManagePath        string            `json:"manage_path"`
 	GithubToken       string            `json:"github_token"`
 	Username          string            `json:"username"`
 	AdditionalCommands []string         `json:"additional_commands"`
 	EnvVariables      map[string]string `json:"env_variables"`
+	ASGI              bool              `json:"asgi"`
 }
 
 func NewDeploymentService() *DeploymentService {
@@ -29,16 +28,13 @@ func NewDeploymentService() *DeploymentService {
 }
 
 func (ds *DeploymentService) Deploy(req *DeploymentRequest) (string, error) {
-	// Extract repo name from URL
 	repoName, err := extractRepoName(req.RepoURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to extract repo name: %v", err)
 	}
 
-	// Create base path: username/repo_name
 	basePath := filepath.Join("deployments", req.Username, repoName)
 	
-	// Create timestamp-based directory
 	timestamp := time.Now().Format("20060102-150405")
 	workDir := filepath.Join(basePath, timestamp)
 	
@@ -47,7 +43,6 @@ func (ds *DeploymentService) Deploy(req *DeploymentRequest) (string, error) {
 		return "", fmt.Errorf("failed to create work directory: %v", err)
 	}
 
-	// Defer cleanup
 	defer func() {
 		log.Printf("Cleaning up deployment directory: %s", workDir)
 		if err := os.RemoveAll(workDir); err != nil {
@@ -55,27 +50,23 @@ func (ds *DeploymentService) Deploy(req *DeploymentRequest) (string, error) {
 		}
 	}()
 
-	// Create Terraform directory
 	terraformDir := filepath.Join(workDir, "terraform")
 	if err := os.MkdirAll(terraformDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create terraform directory: %v", err)
 	}
 
-	// Create Ansible directory
 	ansibleDir := filepath.Join(workDir, "ansible")
 	if err := os.MkdirAll(ansibleDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create ansible directory: %v", err)
 	}
 
-	// Initialize Azure provider with upgraded VM size
 	azure := providers.AzureProvider{
 		ResourceGroup: fmt.Sprintf("%s-%s-rg", req.Username, repoName),
 		Location:      "East US",
-		VMSize:        "Standard_B4ms", // Upgraded for better performance
+		VMSize:        "Standard_B4ms",
 		VMName:        fmt.Sprintf("%s-%s-vm", req.Username, repoName),
 	}
 
-	// Generate and apply Terraform
 	log.Println("Generating Terraform configuration...")
 	if err := azure.GenerateTerraformConfig(terraformDir); err != nil {
 		return "", fmt.Errorf("failed to generate terraform config: %v", err)
@@ -91,7 +82,6 @@ func (ds *DeploymentService) Deploy(req *DeploymentRequest) (string, error) {
 		return "", fmt.Errorf("failed to apply terraform: %v", err)
 	}
 
-	// Get public IP
 	log.Println("Retrieving public IP...")
 	publicIP, err := azure.GetTerraformOutput(terraformDir, "public_ip")
 	if err != nil {
@@ -105,16 +95,13 @@ func (ds *DeploymentService) Deploy(req *DeploymentRequest) (string, error) {
 
 	log.Printf("Retrieved public IP: %s", publicIP)
 
-	// Create Ansible files
 	if err := ds.createAnsibleFiles(ansibleDir, req, publicIP); err != nil {
 		return "", fmt.Errorf("failed to create ansible files: %v", err)
 	}
 
-	// Wait for VM to be ready
 	log.Println("Waiting for VM to be ready...")
-	time.Sleep(60 * time.Second) // Increased wait time
+	time.Sleep(60 * time.Second)
 
-	// Run Ansible playbook
 	log.Println("Running Ansible playbook...")
 	if err := ds.runAnsiblePlaybook(ansibleDir); err != nil {
 		return "", fmt.Errorf("failed to run ansible playbook: %v", err)
@@ -125,7 +112,6 @@ func (ds *DeploymentService) Deploy(req *DeploymentRequest) (string, error) {
 }
 
 func (ds *DeploymentService) createAnsibleFiles(ansibleDir string, req *DeploymentRequest, publicIP string) error {
-	// Create inventory file
 	inventoryContent := fmt.Sprintf(`[django_servers]
 %s ansible_user=azureuser ansible_password=P@ssw0rd1234! ansible_connection=ssh ansible_ssh_common_args='-o StrictHostKeyChecking=no'
 `, publicIP)
@@ -135,8 +121,7 @@ func (ds *DeploymentService) createAnsibleFiles(ansibleDir string, req *Deployme
 		return fmt.Errorf("failed to write inventory file: %v", err)
 	}
 
-	// Create playbook
-	playbookContent := ds.generatePlaybook(req)
+	playbookContent := ds.generatePlaybook(req, publicIP)
 	playbookPath := filepath.Join(ansibleDir, "playbook.yml")
 	if err := os.WriteFile(playbookPath, []byte(playbookContent), 0644); err != nil {
 		return fmt.Errorf("failed to write playbook file: %v", err)
@@ -145,13 +130,12 @@ func (ds *DeploymentService) createAnsibleFiles(ansibleDir string, req *Deployme
 	return nil
 }
 
-func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
+func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest, publicIP string) string {
 	var envVars strings.Builder
 	for key, value := range req.EnvVariables {
 		envVars.WriteString(fmt.Sprintf("      %s: \"%s\"\n", key, value))
 	}
 
-	// Build additional tasks with proper indentation and newlines
 	var additionalTasks strings.Builder
 	for _, cmd := range req.AdditionalCommands {
 		additionalTasks.WriteString(fmt.Sprintf(`
@@ -167,32 +151,23 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
       environment: "{{ env_vars }}"`, cmd))
 	}
 
-	reqPathRelative := req.ReqPath
-	if strings.HasPrefix(req.ReqPath, "/") {
-		reqPathRelative = strings.TrimPrefix(req.ReqPath, "/home/azureuser/app/")
-	}
+	serverType := "Gunicorn"
 	
-	// Build supervisor environment variables
-	var supervisorEnvVars strings.Builder
-	if len(req.EnvVariables) > 0 {
-		for key, value := range req.EnvVariables {
-			supervisorEnvVars.WriteString(fmt.Sprintf(",%s=\"%s\"", key, value))
-		}
+	if req.ASGI {
+		serverType = "Gunicorn+Uvicorn"
 	}
 
-	// Create the complete playbook template
 	var playbookBuilder strings.Builder
 	
-	// Header section
 	playbookBuilder.WriteString(`---
-- name: Deploy Django Application with Gunicorn
+- name: Deploy Django Application with ` + serverType + `
   hosts: django_servers
   become: yes
   vars:
     repo_url: "` + req.RepoURL + `"
-    req_path: "` + reqPathRelative + `"
-    manage_path: "` + req.ManagePath + `"
     github_token: "` + req.GithubToken + `"
+    public_ip: "` + publicIP + `"
+    asgi: ` + fmt.Sprintf("%t", req.ASGI) + `
     env_vars:
 ` + envVars.String() + `
   tasks:
@@ -242,21 +217,38 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
       shell: find /home/azureuser/app -name "manage.py" -exec chmod +x {} \;
       become_user: azureuser
 
-    - name: Create virtual environment
+    - name: Remove existing virtual environment if it exists
+      file:
+        path: /home/azureuser/app/venv
+        state: absent
+
+    - name: Create fresh virtual environment
       command: python3 -m venv venv
       args:
         chdir: /home/azureuser/app
-        creates: /home/azureuser/app/venv
+        creates: /home/azureuser/app/venv/bin/python3
       become_user: azureuser
+
+    - name: Verify virtual environment creation
+      stat:
+        path: /home/azureuser/app/venv/bin/python3
+      register: venv_check
+
+    - name: Fail if virtual environment not created properly
+      fail:
+        msg: "Virtual environment was not created properly"
+      when: not venv_check.stat.exists
 
     - name: Upgrade pip in virtual environment
-      pip:
-        name: pip
-        state: latest
-        virtualenv: /home/azureuser/app/venv
+      shell: |
+        source /home/azureuser/app/venv/bin/activate
+        python -m pip install --upgrade pip
+      args:
+        chdir: /home/azureuser/app
+        executable: /bin/bash
       become_user: azureuser
 
-    - name: Debug - List cloned repository structure
+    - name: Find requirements.txt file
       find:
         paths: /home/azureuser/app
         recurse: yes
@@ -266,23 +258,35 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
 
     - name: Set requirements file path
       set_fact:
-        actual_req_path: "{{ requirements_files.files[0].path if requirements_files.files | length > 0 else '/home/azureuser/app/' + req_path }}"
+        actual_req_path: "{{ requirements_files.files[0].path if requirements_files.files | length > 0 else '/home/azureuser/app/requirements.txt' }}"
 
     - name: Install Python dependencies
-      pip:
-        requirements: "{{ actual_req_path }}"
-        virtualenv: /home/azureuser/app/venv
-        extra_args: --no-cache-dir
+      shell: |
+        source /home/azureuser/app/venv/bin/activate
+        python -m pip install -r "{{ actual_req_path }}" --no-cache-dir
+      args:
+        chdir: /home/azureuser/app
+        executable: /bin/bash
       become_user: azureuser
 
-    - name: Install Gunicorn and other production packages
-      pip:
-        name:
-          - gunicorn
-          - psycopg2-binary
-          - whitenoise
-        virtualenv: /home/azureuser/app/venv
+    - name: Install server packages
+      shell: |
+        source /home/azureuser/app/venv/bin/activate
+        python -m pip install gunicorn psycopg2-binary whitenoise django-cors-headers
+      args:
+        chdir: /home/azureuser/app
+        executable: /bin/bash
       become_user: azureuser
+
+    - name: Install ASGI packages if needed
+      shell: |
+        source /home/azureuser/app/venv/bin/activate
+        python -m pip install "uvicorn[standard]"
+      args:
+        chdir: /home/azureuser/app
+        executable: /bin/bash
+      become_user: azureuser
+      when: asgi
 
     - name: Find Django manage.py file
       find:
@@ -295,43 +299,78 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
       set_fact:
         django_project_path: "{{ manage_files.files[0].path | dirname if manage_files.files | length > 0 else '/home/azureuser/app' }}"
 
-    - name: Extract Django project configuration and WSGI module
+    - name: Extract Django project configuration
       shell: |
-        cd {{ django_project_path }}
+        cd "{{ django_project_path }}"
         source /home/azureuser/app/venv/bin/activate
         export PYTHONPATH="/home/azureuser/app:$PYTHONPATH"
         
-        # Extract project name and settings from manage.py
         python3 -c "
         import os, sys, re
         
+        # Get project name from manage.py
         with open('manage.py', 'r') as f:
             content = f.read()
         
-        # Find settings module
         settings_match = re.search(r'[\"\\']([^\"\\'\s]+\.settings)[\"\\']', content)
         if settings_match:
             settings_module = settings_match.group(1)
             project_name = settings_module.split('.')[0]
         else:
-            # Fallback
             project_name = os.path.basename('{{ django_project_path }}')
             settings_module = project_name + '.settings'
         
-        # Find WSGI module by looking for wsgi.py files
+        # Find WSGI files - look for project-specific ones first
         wsgi_files = []
         for root, dirs, files in os.walk('.'):
+            # Skip virtual environment and other irrelevant directories
+            if 'venv' in root or '__pycache__' in root or '.git' in root:
+                continue
             for file in files:
                 if file == 'wsgi.py':
-                    wsgi_path = os.path.join(root, file)
-                    # Convert to module path
-                    module_path = wsgi_path.replace('/', '.').replace('.py', '').lstrip('./')
+                    rel_path = os.path.relpath(os.path.join(root, file), '.')
+                    # Convert file path to module path
+                    module_path = rel_path.replace('/', '.').replace('.py', '')
                     wsgi_files.append(module_path)
         
-        # Use the first wsgi module found, or construct default
-        wsgi_module = wsgi_files[0] if wsgi_files else project_name + '.wsgi'
+        # Find ASGI files - look for project-specific ones first  
+        asgi_files = []
+        for root, dirs, files in os.walk('.'):
+            # Skip virtual environment and other irrelevant directories
+            if 'venv' in root or '__pycache__' in root or '.git' in root:
+                continue
+            for file in files:
+                if file == 'asgi.py':
+                    rel_path = os.path.relpath(os.path.join(root, file), '.')
+                    # Convert file path to module path
+                    module_path = rel_path.replace('/', '.').replace('.py', '')
+                    asgi_files.append(module_path)
         
-        print(f'{project_name}|{settings_module}|{wsgi_module}')
+        # Prefer project-specific modules over generic ones
+        wsgi_module = None
+        asgi_module = None
+        
+        # For WSGI, prefer modules that contain the project name
+        for module in wsgi_files:
+            if project_name in module:
+                wsgi_module = module
+                break
+        if not wsgi_module and wsgi_files:
+            wsgi_module = wsgi_files[0]
+        if not wsgi_module:
+            wsgi_module = project_name + '.wsgi'
+        
+        # For ASGI, prefer modules that contain the project name
+        for module in asgi_files:
+            if project_name in module:
+                asgi_module = module
+                break
+        if not asgi_module and asgi_files:
+            asgi_module = asgi_files[0]
+        if not asgi_module:
+            asgi_module = project_name + '.asgi'
+        
+        print(f'{project_name}|{settings_module}|{wsgi_module}|{asgi_module}')
         "
       register: django_config
       become_user: azureuser
@@ -341,15 +380,94 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
         django_project_name: "{{ django_config.stdout.split('|')[0] if '|' in django_config.stdout else 'myproject' }}"
         django_settings_module: "{{ django_config.stdout.split('|')[1] if '|' in django_config.stdout else 'myproject.settings' }}"
         django_wsgi_module: "{{ django_config.stdout.split('|')[2] if django_config.stdout.split('|') | length > 2 else 'myproject.wsgi' }}"
+        django_asgi_module: "{{ django_config.stdout.split('|')[3] if django_config.stdout.split('|') | length > 3 else 'myproject.asgi' }}"
 
-    - name: Display detected Django configuration
+    - name: Debug Django configuration
       debug:
         msg: |
-          Detected Django Configuration:
-          - Project Name: {{ django_project_name }}
-          - Settings Module: {{ django_settings_module }}
-          - WSGI Module: {{ django_wsgi_module }}
-          - Project Path: {{ django_project_path }}
+          Project: {{ django_project_name }}
+          Settings: {{ django_settings_module }}
+          WSGI: {{ django_wsgi_module }}
+          ASGI: {{ django_asgi_module }}
+
+    - name: Update Django settings for ALLOWED_HOSTS and CORS
+      shell: |
+        cd "{{ django_project_path }}"
+        source /home/azureuser/app/venv/bin/activate
+        export PYTHONPATH="/home/azureuser/app:$PYTHONPATH"
+        
+        python3 -c "
+        import os, sys, re
+        
+        settings_file = '{{ django_settings_module }}'.replace('.', '/') + '.py'
+        if not os.path.exists(settings_file):
+            for root, dirs, files in os.walk('.'):
+                for file in files:
+                    if file == 'settings.py':
+                        settings_file = os.path.join(root, file)
+                        break
+        
+        if os.path.exists(settings_file):
+            with open(settings_file, 'r') as f:
+                content = f.read()
+            
+            # Update ALLOWED_HOSTS
+            allowed_hosts_match = re.search(r'ALLOWED_HOSTS\s*=\s*\[(.*?)\]', content, re.DOTALL)
+            if allowed_hosts_match:
+                hosts_content = allowed_hosts_match.group(1).strip()
+                if hosts_content != \"'*'\" and \"'*'\" not in hosts_content:
+                    if hosts_content:
+                        hosts_content = hosts_content.rstrip().rstrip(',')
+                        new_hosts = f'[{hosts_content}, \"{{ public_ip }}\"]'
+                    else:
+                        new_hosts = f'[\"{{ public_ip }}\"]'
+                    content = re.sub(r'ALLOWED_HOSTS\s*=\s*\[.*?\]', f'ALLOWED_HOSTS = {new_hosts}', content, flags=re.DOTALL)
+            else:
+                content += f\"\\nALLOWED_HOSTS = ['{{ public_ip }}']\\n\"
+            
+            # Add corsheaders to INSTALLED_APPS if not present
+            if 'corsheaders' not in content:
+                installed_apps_match = re.search(r'INSTALLED_APPS\s*=\s*\[(.*?)\]', content, re.DOTALL)
+                if installed_apps_match:
+                    apps_content = installed_apps_match.group(1).strip()
+                    apps_content = apps_content.rstrip().rstrip(',')
+                    new_apps = f'[{apps_content},\\n    \"corsheaders\"]'
+                    content = re.sub(r'INSTALLED_APPS\s*=\s*\[.*?\]', f'INSTALLED_APPS = {new_apps}', content, flags=re.DOTALL)
+                else:
+                    content += \"\\nINSTALLED_APPS.append('corsheaders')\\n\"
+            
+            # Add CORS middleware if not present
+            if 'corsheaders.middleware.CorsMiddleware' not in content:
+                middleware_match = re.search(r'MIDDLEWARE\s*=\s*\[(.*?)\]', content, re.DOTALL)
+                if middleware_match:
+                    middleware_content = middleware_match.group(1).strip()
+                    middleware_content = middleware_content.rstrip().rstrip(',')
+                    new_middleware = f'[\"corsheaders.middleware.CorsMiddleware\",\\n    {middleware_content}]'
+                    content = re.sub(r'MIDDLEWARE\s*=\s*\[.*?\]', f'MIDDLEWARE = {new_middleware}', content, flags=re.DOTALL)
+                else:
+                    content += \"\\nMIDDLEWARE = ['corsheaders.middleware.CorsMiddleware'] + MIDDLEWARE\\n\"
+            
+            # Handle CORS settings
+            cors_allow_all_match = re.search(r'CORS_ALLOW_ALL_ORIGINS\s*=\s*(True|False)', content)
+            if cors_allow_all_match:
+                if cors_allow_all_match.group(1) != 'True':
+                    cors_allowed_match = re.search(r'CORS_ALLOWED_ORIGINS\s*=\s*\[(.*?)\]', content, re.DOTALL)
+                    if cors_allowed_match:
+                        origins_content = cors_allowed_match.group(1).strip()
+                        origins_content = origins_content.rstrip().rstrip(',')
+                        new_origins = f'[{origins_content},\\n    \"http://{{ public_ip }}\"]'
+                        content = re.sub(r'CORS_ALLOWED_ORIGINS\s*=\s*\[.*?\]', f'CORS_ALLOWED_ORIGINS = {new_origins}', content, flags=re.DOTALL)
+                    else:
+                        content += f\"\\nCORS_ALLOWED_ORIGINS = [\\n    'http://{{ public_ip }}'\\n]\\n\"
+            else:
+                content += f\"\\nCORS_ALLOWED_ORIGINS = [\\n    'http://{{ public_ip }}'\\n]\\n\"
+            
+            with open(settings_file, 'w') as f:
+                f.write(content)
+        "
+      args:
+        executable: /bin/bash
+      become_user: azureuser
 
     - name: Create .env file for environment variables
       copy:
@@ -383,56 +501,18 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
         mode: "{{ item.mode }}"
       loop:
         - { path: "/home/azureuser/logs", state: "directory", owner: "azureuser", group: "azureuser", mode: "0755" }
-        - { path: "/home/azureuser/logs/gunicorn-access.log", state: "touch", owner: "azureuser", group: "azureuser", mode: "0644" }
-        - { path: "/home/azureuser/logs/gunicorn-error.log", state: "touch", owner: "azureuser", group: "azureuser", mode: "0644" }
-        - { path: "/home/azureuser/logs/django-gunicorn-stdout.log", state: "touch", owner: "azureuser", group: "azureuser", mode: "0644" }
-        - { path: "/home/azureuser/logs/django-gunicorn-stderr.log", state: "touch", owner: "azureuser", group: "azureuser", mode: "0644" }
-
-    - name: Test Django configuration and WSGI module
-      shell: |
-        cd {{ django_project_path }}
-        source /home/azureuser/app/venv/bin/activate
-        export DJANGO_SETTINGS_MODULE="{{ django_settings_module }}"
-        export PYTHONPATH="/home/azureuser/app:$PYTHONPATH"
-        
-        echo "=== Testing Django Configuration ==="
-        python3 manage.py check --deploy || python3 manage.py check
-        
-        echo "=== Testing WSGI Module Import ==="
-        python3 -c "
-        import sys
-        sys.path.insert(0, '/home/azureuser/app')
-        try:
-            from {{ django_wsgi_module }} import application
-            print('WSGI module {{ django_wsgi_module }} imported successfully')
-            print('Application object:', application)
-        except Exception as e:
-            print('Error importing WSGI module {{ django_wsgi_module }}:', e)
-            # Try alternative WSGI paths
-            import os
-            for root, dirs, files in os.walk('/home/azureuser/app'):
-                for file in files:
-                    if file == 'wsgi.py':
-                        print('Found wsgi.py at:', os.path.join(root, file))
-        "
-      args:
-        executable: /bin/bash
-      become_user: azureuser
-      environment: "{{ env_vars }}"
-      register: django_test
-      ignore_errors: yes
-
-    - name: Show Django test results
-      debug:
-        var: django_test.stdout_lines
+        - { path: "/home/azureuser/logs/server-access.log", state: "touch", owner: "azureuser", group: "azureuser", mode: "0644" }
+        - { path: "/home/azureuser/logs/server-error.log", state: "touch", owner: "azureuser", group: "azureuser", mode: "0644" }
+        - { path: "/home/azureuser/logs/django-server-stdout.log", state: "touch", owner: "azureuser", group: "azureuser", mode: "0644" }
+        - { path: "/home/azureuser/logs/django-server-stderr.log", state: "touch", owner: "azureuser", group: "azureuser", mode: "0644" }
 
     - name: Run Django migrations
       shell: |
-        cd {{ django_project_path }}
+        cd "{{ django_project_path }}"
         source /home/azureuser/app/venv/bin/activate
         export DJANGO_SETTINGS_MODULE="{{ django_settings_module }}"
         export PYTHONPATH="/home/azureuser/app:$PYTHONPATH"
-        python3 manage.py migrate --noinput
+        python manage.py migrate --noinput
       args:
         executable: /bin/bash
       become_user: azureuser
@@ -440,61 +520,86 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
 
     - name: Collect static files
       shell: |
-        cd {{ django_project_path }}
+        cd "{{ django_project_path }}"
         source /home/azureuser/app/venv/bin/activate
         export DJANGO_SETTINGS_MODULE="{{ django_settings_module }}"
         export PYTHONPATH="/home/azureuser/app:$PYTHONPATH"
-        python3 manage.py collectstatic --noinput
+        python manage.py collectstatic --noinput
       args:
         executable: /bin/bash
       become_user: azureuser
       environment: "{{ env_vars }}"
       ignore_errors: yes`)
 
-	// Add additional tasks if any
 	if len(req.AdditionalCommands) > 0 {
 		playbookBuilder.WriteString(additionalTasks.String())
 	}
 
-	// Continue with Gunicorn configuration
-	playbookBuilder.WriteString(`
+	if req.ASGI {
+		playbookBuilder.WriteString(`
 
-    - name: Create Gunicorn configuration file
-      copy:
-        content: |
-          bind = "0.0.0.0:8000"
-          workers = 3
-          worker_class = "sync"
-          worker_connections = 1000
-          timeout = 300
-          keepalive = 2
-          max_requests = 1000
-          max_requests_jitter = 50
-          preload_app = True
-          reload = False
-          daemon = False
-          user = "azureuser"
-          group = "azureuser"
-          tmp_upload_dir = None
-          secure_scheme_headers = {
-              'X-FORWARDED-PROTO': 'https',
-          }
-          forwarded_allow_ips = '*'
-          access_log_format = '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s" %(D)s'
-          accesslog = "/home/azureuser/logs/gunicorn-access.log"
-          errorlog = "/home/azureuser/logs/gunicorn-error.log"
-          loglevel = "info"
-        dest: /home/azureuser/app/gunicorn.conf.py
-        owner: azureuser
-        group: azureuser
-        mode: '0644'
+    - name: Verify ASGI module can be imported
+      shell: |
+        cd "{{ django_project_path }}"
+        source /home/azureuser/app/venv/bin/activate
+        export DJANGO_SETTINGS_MODULE="{{ django_settings_module }}"
+        export PYTHONPATH="/home/azureuser/app:$PYTHONPATH"
+        python -c "
+        import django
+        django.setup()
+        import importlib
+        import sys
+        import os
+        
+        try:
+            # Try to import the ASGI module
+            asgi_module = importlib.import_module('{{ django_asgi_module }}')
+            print('ASGI module imported successfully: {{ django_asgi_module }}')
+            
+            # Check if it has the application attribute
+            if hasattr(asgi_module, 'application'):
+                app = asgi_module.application
+                print('ASGI application found')
+            else:
+                print('Warning: ASGI application attribute not found')
+                # List available attributes for debugging
+                attrs = [attr for attr in dir(asgi_module) if not attr.startswith('_')]
+                print(f'Available attributes: {attrs}')
+                
+        except ImportError as e:
+            print(f'Error importing ASGI module {{ django_asgi_module }}: {e}')
+            
+            # Try to find and suggest alternative ASGI modules
+            print('Searching for available ASGI modules...')
+            for root, dirs, files in os.walk('.'):
+                if 'venv' in root or '__pycache__' in root:
+                    continue
+                for file in files:
+                    if file == 'asgi.py':
+                        asgi_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(asgi_path, '.')
+                        module_path = rel_path.replace('/', '.').replace('.py', '')
+                        print(f'Found ASGI file: {module_path}')
+            raise
+        "
+      args:
+        executable: /bin/bash
+      become_user: azureuser
+      environment: "{{ env_vars }}"
 
-    - name: Create Gunicorn startup script for testing
+    - name: Create ASGI startup script
       copy:
         content: |
           #!/bin/bash
-          cd {{ django_project_path }}
+          set -e
+          
+          echo "Starting Django ASGI server..."
+          cd "{{ django_project_path }}"
+          
+          # Activate virtual environment using absolute path
           source /home/azureuser/app/venv/bin/activate
+          
+          # Set environment variables
           export DJANGO_SETTINGS_MODULE="{{ django_settings_module }}"
           export PYTHONPATH="/home/azureuser/app:$PYTHONPATH"
           ` + func() string {
@@ -505,51 +610,88 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
 		return envExports.String()
 	}() + `
           
-          echo "=== Environment Check ==="
-          echo "DJANGO_SETTINGS_MODULE: $DJANGO_SETTINGS_MODULE"
-          echo "PYTHONPATH: $PYTHONPATH"
-          echo "Working Directory: $(pwd)"
-          
-          echo "=== Testing WSGI Import ==="
-          python3 -c "
-          import sys
-          from {{ django_wsgi_module }} import application
-          print('WSGI application loaded successfully:', application)
-          "
-          
-          echo "=== Starting Gunicorn ==="
-          exec /home/azureuser/app/venv/bin/gunicorn {{ django_wsgi_module }}:application -c /home/azureuser/app/gunicorn.conf.py
-        dest: /home/azureuser/app/start_gunicorn.sh
+          # Use absolute path to gunicorn with corrected arguments
+          exec /home/azureuser/app/venv/bin/gunicorn {{ django_asgi_module }}:application \
+            --bind 0.0.0.0:8000 \
+            --workers 3 \
+            --worker-class uvicorn.workers.UvicornWorker \
+            --worker-connections 1000 \
+            --timeout 300 \
+            --max-requests 1000 \
+            --max-requests-jitter 50 \
+            --preload \
+            --access-logfile /home/azureuser/logs/server-access.log \
+            --error-logfile /home/azureuser/logs/server-error.log \
+            --log-level info \
+            --user azureuser \
+            --group azureuser
+        dest: /home/azureuser/app/start_server.sh
         owner: azureuser
         group: azureuser
-        mode: '0755'
+        mode: '0755'`)
+	} else {
+		playbookBuilder.WriteString(`
 
-    - name: Test Gunicorn startup manually
-      shell: |
-        cd {{ django_project_path }}
-        timeout 10s /home/azureuser/app/start_gunicorn.sh || echo "Gunicorn test completed"
-      become_user: azureuser
-      register: gunicorn_test
-      ignore_errors: yes
-
-    - name: Show Gunicorn test results
-      debug:
-        var: gunicorn_test
-
-    - name: Create supervisor configuration for Django with Gunicorn
+    - name: Create WSGI startup script
       copy:
         content: |
-          [program:django-gunicorn]
-          command=/home/azureuser/app/start_gunicorn.sh
+          #!/bin/bash
+          set -e
+          
+          echo "Starting Django WSGI server..."
+          cd "{{ django_project_path }}"
+          
+          # Activate virtual environment using absolute path
+          source /home/azureuser/app/venv/bin/activate
+          
+          # Set environment variables
+          export DJANGO_SETTINGS_MODULE="{{ django_settings_module }}"
+          export PYTHONPATH="/home/azureuser/app:$PYTHONPATH"
+          ` + func() string {
+		var envExports strings.Builder
+		for key, value := range req.EnvVariables {
+			envExports.WriteString(fmt.Sprintf("          export %s=\"%s\"\n", key, value))
+		}
+		return envExports.String()
+	}() + `
+          
+          # Use absolute path to gunicorn with corrected arguments
+          exec /home/azureuser/app/venv/bin/gunicorn {{ django_wsgi_module }}:application \
+            --bind 0.0.0.0:8000 \
+            --workers 3 \
+            --worker-class sync \
+            --worker-connections 1000 \
+            --timeout 300 \
+            --max-requests 1000 \
+            --max-requests-jitter 50 \
+            --preload \
+            --access-logfile /home/azureuser/logs/server-access.log \
+            --error-logfile /home/azureuser/logs/server-error.log \
+            --log-level info \
+            --user azureuser \
+            --group azureuser
+        dest: /home/azureuser/app/start_server.sh
+        owner: azureuser
+        group: azureuser
+        mode: '0755'`)
+	}
+
+	playbookBuilder.WriteString(`
+
+    - name: Create supervisor configuration for Django
+      copy:
+        content: |
+          [program:django-server]
+          command=/home/azureuser/app/start_server.sh
           directory={{ django_project_path }}
           user=azureuser
           autostart=true
           autorestart=true
           redirect_stderr=false
-          stdout_logfile=/home/azureuser/logs/django-gunicorn-stdout.log
+          stdout_logfile=/home/azureuser/logs/django-server-stdout.log
           stdout_logfile_maxbytes=50MB
           stdout_logfile_backups=5
-          stderr_logfile=/home/azureuser/logs/django-gunicorn-stderr.log
+          stderr_logfile=/home/azureuser/logs/django-server-stderr.log
           stderr_logfile_maxbytes=50MB
           stderr_logfile_backups=5
           killasgroup=true
@@ -557,8 +699,9 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
           stopsignal=TERM
           stopwaitsecs=10
           startretries=3
-          startsecs=5
-        dest: /etc/supervisor/conf.d/django-gunicorn.conf
+          startsecs=10
+          environment=HOME="/home/azureuser",USER="azureuser",PATH="/home/azureuser/app/venv/bin:/usr/local/bin:/usr/bin:/bin"
+        dest: /etc/supervisor/conf.d/django-server.conf
         backup: yes
       notify: restart supervisor
 
@@ -570,13 +713,11 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
               server_name _;
               client_max_body_size 100M;
               
-              # Security headers
               add_header X-Frame-Options "SAMEORIGIN" always;
               add_header X-XSS-Protection "1; mode=block" always;
               add_header X-Content-Type-Options "nosniff" always;
               add_header Referrer-Policy "no-referrer-when-downgrade" always;
               
-              # Increase timeout values
               proxy_connect_timeout 300s;
               proxy_send_timeout 300s;
               proxy_read_timeout 300s;
@@ -603,7 +744,6 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
                   add_header Cache-Control "public, no-transform";
               }
               
-              # Health check endpoint
               location /health/ {
                   access_log off;
                   return 200 "healthy\n";
@@ -626,15 +766,6 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
         state: absent
       notify: restart nginx
 
-    - name: Test nginx configuration
-      command: nginx -t
-      register: nginx_test
-      ignore_errors: yes
-
-    - name: Show nginx test result
-      debug:
-        var: nginx_test
-
     - name: Ensure supervisor is running
       systemd:
         name: supervisor
@@ -649,9 +780,9 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
       pause:
         seconds: 5
 
-    - name: Stop any existing django-gunicorn process
+    - name: Stop any existing django-server process
       supervisorctl:
-        name: django-gunicorn
+        name: django-server
         state: stopped
       ignore_errors: yes
 
@@ -659,47 +790,39 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
       pause:
         seconds: 3
 
-    - name: Start Django application with Gunicorn
+    - name: Start Django application
       supervisorctl:
-        name: django-gunicorn
+        name: django-server
         state: started
-      register: gunicorn_start
+      register: server_start
       ignore_errors: yes
 
     - name: Wait for Django application to start
       pause:
         seconds: 10
 
-    - name: Check Django application status with detailed logging
-      shell: |
-        echo "=== Supervisor Status ==="
-        supervisorctl status django-gunicorn
-        
-        echo "=== Supervisor Logs ==="
-        supervisorctl tail django-gunicorn stderr | head -20
-        
-        echo "=== Process Status ==="
-        ps aux | grep -E "(gunicorn|python)" | grep -v grep
-        
-        echo "=== Port 8000 Status ==="
-        ss -tlnp | grep :8000 || echo "Port 8000 not found"
-        
-        echo "=== Application Logs ==="
-        tail -20 /home/azureuser/logs/django-gunicorn-stdout.log 2>/dev/null || echo "No stdout logs"
-        echo "--- stderr ---"
-        tail -20 /home/azureuser/logs/django-gunicorn-stderr.log 2>/dev/null || echo "No stderr logs"
-        
-        echo "=== Gunicorn Logs ==="
-        tail -20 /home/azureuser/logs/gunicorn-error.log 2>/dev/null || echo "No gunicorn error logs"
-        
-        echo "=== Test Django Response ==="
-        curl -I http://localhost:8000 || echo "Django not responding"
-      register: django_status
+    - name: Check final server status
+      shell: supervisorctl status django-server
+      register: final_status
       ignore_errors: yes
 
-    - name: Show Django application status
+    - name: Display final status
       debug:
-        var: django_status.stdout_lines
+        msg: "Server status: {{ final_status.stdout }}"
+
+    - name: Show recent logs if server failed to start
+      shell: |
+        echo "=== STDOUT ==="
+        tail -n 20 /home/azureuser/logs/django-server-stdout.log 2>/dev/null || echo "No stdout log"
+        echo "=== STDERR ==="
+        tail -n 20 /home/azureuser/logs/django-server-stderr.log 2>/dev/null || echo "No stderr log"
+      register: debug_logs
+      when: final_status.stdout is defined and 'RUNNING' not in final_status.stdout
+
+    - name: Display debug logs
+      debug:
+        msg: "{{ debug_logs.stdout_lines }}"
+      when: final_status.stdout is defined and 'RUNNING' not in final_status.stdout
 
     - name: Ensure nginx is running
       systemd:
@@ -707,33 +830,13 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
         state: started
         enabled: yes
 
-    - name: Test full application stack
-      shell: |
-        echo "=== Testing Nginx ==="
-        curl -I http://localhost || echo "Nginx not responding"
-        
-        echo "=== Testing Django through Nginx ==="
-        curl -s -o /dev/null -w "HTTP Status: %{http_code}\n" http://localhost || echo "Full stack test failed"
-        
-        echo "=== Recent Nginx Error Logs ==="
-        tail -10 /var/log/nginx/error.log 2>/dev/null || echo "No nginx error logs"
-      register: final_test
-      ignore_errors: yes
-
-    - name: Show final test results
-      debug:
-        var: final_test.stdout_lines
-
     - name: Display deployment summary
       debug:
         msg: |
           Deployment Summary:
           - Django Project: {{ django_project_name }}
           - Settings Module: {{ django_settings_module }}
-          - WSGI Module: {{ django_wsgi_module }}
-          - Project Path: {{ django_project_path }}
-          - Server: Gunicorn with 3 workers
-          - Web Server: Nginx
+          - Server Type: ` + serverType + `
           - Application URL: http://{{ ansible_host }}
           - Logs: /home/azureuser/logs/
 
@@ -751,7 +854,6 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest) string {
 
 	return playbookBuilder.String()
 }
-
 func (ds *DeploymentService) runAnsiblePlaybook(ansibleDir string) error {
 	cmd := exec.Command("ansible-playbook", "-i", "inventory.ini", "playbook.yml", "-v")
 	cmd.Dir = ansibleDir
@@ -766,11 +868,9 @@ func extractRepoName(repoURL string) (string, error) {
 		return "", err
 	}
 
-	// Extract path and remove .git suffix if present
 	path := strings.TrimPrefix(parsedURL.Path, "/")
 	path = strings.TrimSuffix(path, ".git")
 	
-	// Get the repo name (last part of the path)
 	parts := strings.Split(path, "/")
 	if len(parts) < 2 {
 		return "", fmt.Errorf("invalid repository URL format")

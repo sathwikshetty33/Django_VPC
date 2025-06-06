@@ -97,11 +97,9 @@ func validateRequest(req *services.DeploymentRequest) error {
 	if req.GithubToken == "" {
 		return fmt.Errorf("github_token is required")
 	}
-	if req.ReqPath == "" {
-		return fmt.Errorf("req_path is required")
-	}
-	if req.ManagePath == "" {
-		return fmt.Errorf("manage_path is required")
-	}
+	// if req.ASGI != true || req.ASGI != false {
+	// 	return fmt.Errorf("asgi is required")
+	// }
+
 	return nil
 }
