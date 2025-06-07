@@ -8,10 +8,16 @@ import (
 	"strings"
 )
 
-func (ds *DeploymentService) createAnsibleFiles(ansibleDir string, req *DeploymentRequest, publicIP string) error {
+func (ds *DeploymentService) createAnsibleFiles(ansibleDir string, req *DeploymentRequest, publicIP string, privateKeyPath string) error {
+	// Use absolute path for the private key to avoid issues
+	absPrivateKeyPath, err := filepath.Abs(privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for private key: %v", err)
+	}
+
 	inventoryContent := fmt.Sprintf(`[django_servers]
-%s ansible_user=azureuser ansible_password=P@ssw0rd1234! ansible_connection=ssh ansible_ssh_common_args='-o StrictHostKeyChecking=no'
-`, publicIP)
+%s ansible_user=azureuser ansible_ssh_private_key_file=%s ansible_connection=ssh ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+`, publicIP, absPrivateKeyPath)
 
 	inventoryPath := filepath.Join(ansibleDir, "inventory.ini")
 	if err := os.WriteFile(inventoryPath, []byte(inventoryContent), 0644); err != nil {
@@ -26,6 +32,27 @@ func (ds *DeploymentService) createAnsibleFiles(ansibleDir string, req *Deployme
 
 	return nil
 }
+
+// func (ds *DeploymentService) setupAnsibleSSHKeys(ansibleDir string) (string, string, error) {
+// 	privateKey, publicKey, err := ds.generateSSHKeyPair()
+// 	if err != nil {
+// 		return "", "", fmt.Errorf("failed to generate SSH key pair: %v", err)
+// 	}
+
+// 	privateKeyPath := filepath.Join(ansibleDir, "ansible_key")
+// 	if err := os.WriteFile(privateKeyPath, []byte(privateKey), 0600); err != nil {
+// 		return "", "", fmt.Errorf("failed to write private key file: %v", err)
+// 	}
+
+// 	// Save public key for copying to server
+// 	publicKeyPath := filepath.Join(ansibleDir, "ansible_key.pub")
+// 	if err := os.WriteFile(publicKeyPath, []byte(publicKey), 0644); err != nil {
+// 		return "", "", fmt.Errorf("failed to write public key file: %v", err)
+// 	}
+
+// 	return privateKeyPath, publicKeyPath, nil
+// }
+
 
 func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest, publicIP string) string {
 	var envVars strings.Builder
@@ -49,13 +76,13 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest, publicIP s
 	}
 
 	serverType := "Gunicorn"
-	
+
 	if req.ASGI {
 		serverType = "Gunicorn+Uvicorn"
 	}
 
 	var playbookBuilder strings.Builder
-	
+
 	playbookBuilder.WriteString(`---
 - name: Deploy Django Application with ` + serverType + `
   hosts: django_servers
@@ -68,6 +95,13 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest, publicIP s
     env_vars:
 ` + envVars.String() + `
   tasks:
+    - name: Setup SSH key authentication
+      authorized_key:
+        user: azureuser
+        state: present
+        key: "{{ lookup('file', ansible_ssh_private_key_file + '.pub') }}"
+        comment: "Ansible deployment key"
+
     - name: Update apt cache
       apt:
         update_cache: yes
@@ -500,12 +534,12 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest, publicIP s
           export DJANGO_SETTINGS_MODULE="{{ django_settings_module }}"
           export PYTHONPATH="/home/azureuser/app:$PYTHONPATH"
           ` + func() string {
-		var envExports strings.Builder
-		for key, value := range req.EnvVariables {
-			envExports.WriteString(fmt.Sprintf("          export %s=\"%s\"\n", key, value))
-		}
-		return envExports.String()
-	}() + `
+			var envExports strings.Builder
+			for key, value := range req.EnvVariables {
+				envExports.WriteString(fmt.Sprintf("          export %s=\"%s\"\n", key, value))
+			}
+			return envExports.String()
+		}() + `
           
           # Use absolute path to gunicorn with corrected arguments
           exec /home/azureuser/app/venv/bin/gunicorn {{ django_asgi_module }}:application \
@@ -545,12 +579,12 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest, publicIP s
           export DJANGO_SETTINGS_MODULE="{{ django_settings_module }}"
           export PYTHONPATH="/home/azureuser/app:$PYTHONPATH"
           ` + func() string {
-		var envExports strings.Builder
-		for key, value := range req.EnvVariables {
-			envExports.WriteString(fmt.Sprintf("          export %s=\"%s\"\n", key, value))
-		}
-		return envExports.String()
-	}() + `
+			var envExports strings.Builder
+			for key, value := range req.EnvVariables {
+				envExports.WriteString(fmt.Sprintf("          export %s=\"%s\"\n", key, value))
+			}
+			return envExports.String()
+		}() + `
           
           # Use absolute path to gunicorn with corrected arguments
           exec /home/azureuser/app/venv/bin/gunicorn {{ django_wsgi_module }}:application \
@@ -752,9 +786,16 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest, publicIP s
 	return playbookBuilder.String()
 }
 func (ds *DeploymentService) runAnsiblePlaybook(ansibleDir string) error {
-	cmd := exec.Command("ansible-playbook", "-i", "inventory.ini", "playbook.yml", "-v")
+	cmd := exec.Command("ansible-playbook", "-i", "inventory.ini", "playbook.yml", "-v", "--timeout", "300")
 	cmd.Dir = ansibleDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	
+	cmd.Env = append(os.Environ(),
+		"ANSIBLE_HOST_KEY_CHECKING=False",
+		"ANSIBLE_SSH_RETRIES=3",
+		"ANSIBLE_TIMEOUT=300",
+	)
+	
 	return cmd.Run()
 }

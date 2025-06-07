@@ -1,48 +1,31 @@
 package services
 
 import (
-	// "crypto/rand"
-	// "crypto/rsa"
-	// "crypto/x509"
-	// "encoding/pem"
-	// "fmt"
-	// "log"
-	// "net/url"
-	// "os"
-	// "os/exec"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sathwikshetty33/Django-vpc/Providers"
 	"strings"
 	"time"
-
-	// "golang.org/x/crypto/ssh"
-	// "bytes"
-	// "context"
-	// "encoding/json"
-	// "net/http"
-	// "io"
 )
 
 type DeploymentService struct{}
 
 type DeploymentRequest struct {
-	RepoURL           string            `json:"repo_url"`
-	GithubToken       string            `json:"github_token"`
-	Username          string            `json:"username"`
-	AdditionalCommands []string         `json:"additional_commands"`
-	EnvVariables      map[string]string `json:"env_variables"`
-	ASGI              bool              `json:"asgi"`
-  AutoDeploy bool `json:"auto_deploy"`
-
+	RepoURL            string            `json:"repo_url"`
+	GithubToken        string            `json:"github_token"`
+	Username           string            `json:"username"`
+	AdditionalCommands []string          `json:"additional_commands"`
+	EnvVariables       map[string]string `json:"env_variables"`
+	ASGI               bool              `json:"asgi"`
+	AutoDeploy         bool              `json:"auto_deploy"`
 }
 
 func NewDeploymentService() *DeploymentService {
 	return &DeploymentService{}
 }
-
 func (ds *DeploymentService) Deploy(req *DeploymentRequest) (string, error) {
 	repoName, err := extractRepoName(req.RepoURL)
 	if err != nil {
@@ -83,6 +66,12 @@ func (ds *DeploymentService) Deploy(req *DeploymentRequest) (string, error) {
 		VMName:        fmt.Sprintf("%s-%s-vm", req.Username, repoName),
 	}
 
+	log.Println("Generating SSH keys...")
+	_, _, err = azure.GenerateSSHKeys(terraformDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate SSH keys: %v", err)
+	}
+
 	log.Println("Generating Terraform configuration...")
 	if err := azure.GenerateTerraformConfig(terraformDir); err != nil {
 		return "", fmt.Errorf("failed to generate terraform config: %v", err)
@@ -111,20 +100,41 @@ func (ds *DeploymentService) Deploy(req *DeploymentRequest) (string, error) {
 
 	log.Printf("Retrieved public IP: %s", publicIP)
 
-	if err := ds.createAnsibleFiles(ansibleDir, req, publicIP); err != nil {
+	log.Println("Using generated SSH keys for Ansible...")
+	azurePrivateKeyPath := filepath.Join(terraformDir, "azure_vm_key")
+	azurePublicKeyPath := filepath.Join(terraformDir, "azure_vm_key.pub")
+	
+	if _, err := os.Stat(azurePrivateKeyPath); err != nil {
+		return "", fmt.Errorf("Private key not found at %s: %v", azurePrivateKeyPath, err)
+	}
+	if _, err := os.Stat(azurePublicKeyPath); err != nil {
+		return "", fmt.Errorf("Public key not found at %s: %v", azurePublicKeyPath, err)
+	}
+
+	log.Printf("Using private key: %s", azurePrivateKeyPath)
+	log.Printf("Using public key: %s", azurePublicKeyPath)
+
+	if err := ds.createAnsibleFiles(ansibleDir, req, publicIP, azurePrivateKeyPath); err != nil {
 		return "", fmt.Errorf("failed to create ansible files: %v", err)
 	}
 
 	log.Println("Waiting for VM to be ready...")
 	time.Sleep(60 * time.Second)
 
+	log.Println("Testing SSH connectivity...")
+	if err := ds.testSSHConnectivity(publicIP, azurePrivateKeyPath); err != nil {
+		log.Printf("SSH connectivity test failed, but continuing: %v", err)
+		time.Sleep(30 * time.Second)
+	}
+
 	log.Println("Running Ansible playbook...")
 	if err := ds.runAnsiblePlaybook(ansibleDir); err != nil {
 		return "", fmt.Errorf("failed to run ansible playbook: %v", err)
 	}
-  if req.AutoDeploy {
-		log.Println("Setting up GitHub Actions auto-deployment...")
-		if err := ds.setupGitHubActionsOnServer(ansibleDir, req, publicIP); err != nil {
+
+	if req.AutoDeploy {
+		log.Println("Setting up GitHub Actions auto-deployment using existing SSH keys...")
+		if err := ds.setupGitHubActionsOnServer(ansibleDir, req, publicIP, terraformDir); err != nil {
 			log.Printf("Warning: failed to setup GitHub Actions: %v", err)
 		}
 
@@ -132,11 +142,26 @@ func (ds *DeploymentService) Deploy(req *DeploymentRequest) (string, error) {
 			log.Printf("Warning: failed to run GitHub Actions setup tasks: %v", err)
 		}
 	}
+
 	log.Println("Deployment completed successfully!")
 	return publicIP, nil
-
-  
 }
 
 
-
+func (ds *DeploymentService) testSSHConnectivity(publicIP, privateKeyPath string) error {
+	cmd := exec.Command("ssh", 
+		"-i", privateKeyPath,
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "ConnectTimeout=10",
+		fmt.Sprintf("azureuser@%s", publicIP),
+		"echo 'SSH test successful'")
+	
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("SSH test failed: %v, output: %s", err, string(output))
+	}
+	
+	log.Printf("SSH test output: %s", string(output))
+	return nil
+}

@@ -348,15 +348,25 @@ func (ds *DeploymentService) generateAdditionalCommands(additionalCommands []str
 	return commands.String()
 }
 
-func (ds *DeploymentService) setupGitHubActionsOnServer(ansibleDir string, req *DeploymentRequest, publicIP string) error {
+func (ds *DeploymentService) setupGitHubActionsOnServer(ansibleDir string, req *DeploymentRequest, publicIP string, terraformDir string) error {
 	if !req.AutoDeploy {
 		return nil 
 	}
 
-	privateKey, publicKey, err := ds.generateSSHKeyPair()
+	privateKeyPath := filepath.Join(terraformDir, "azure_vm_key")
+	publicKeyPath := filepath.Join(terraformDir, "azure_vm_key.pub")
+
+	privateKeyBytes, err := os.ReadFile(privateKeyPath)
 	if err != nil {
-		return fmt.Errorf("failed to generate SSH key pair: %v", err)
+		return fmt.Errorf("failed to read existing private key from %s: %v", privateKeyPath, err)
 	}
+	privateKey := string(privateKeyBytes)
+
+	publicKeyBytes, err := os.ReadFile(publicKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to read existing public key from %s: %v", publicKeyPath, err)
+	}
+	publicKey := strings.TrimSpace(string(publicKeyBytes))
 
 	if err := ds.setupGitHubSecrets(req, privateKey); err != nil {
 		return fmt.Errorf("failed to setup GitHub secrets: %v", err)
@@ -378,12 +388,12 @@ func (ds *DeploymentService) setupGitHubActionsOnServer(ansibleDir string, req *
     repo_url: "%s"
     github_token: "%s"
   tasks:
-    - name: Add GitHub Actions public key to authorized_keys
+    - name: Add GitHub Actions public key to authorized_keys (already exists but ensuring)
       authorized_key:
         user: azureuser
         state: present
         key: "{{ public_key }}"
-        comment: "GitHub Actions Deploy Key"
+        comment: "GitHub Actions Deploy Key (same as Azure VM key)"
       become_user: azureuser
 
     - name: Create .github/workflows directory in repository
@@ -451,11 +461,13 @@ func (ds *DeploymentService) setupGitHubActionsOnServer(ansibleDir string, req *
           GitHub Actions Auto-Deploy Setup Complete!
           ============================================
           
-          ✅ SSH private key has been automatically added to GitHub secrets
+          ✅ SSH private key has been automatically added to GitHub secrets (reusing Terraform key)
           ✅ Environment variables have been added to GitHub secrets
           ✅ GitHub Actions workflow has been created and committed
           
           Your repository will now auto-deploy on every push to main/master branch!
+          
+          The same SSH key used for VM creation is now being used for GitHub Actions deployment.
           
           You can monitor deployments in the "Actions" tab of your GitHub repository.
           ============================================
@@ -465,23 +477,24 @@ func (ds *DeploymentService) setupGitHubActionsOnServer(ansibleDir string, req *
 		return fmt.Errorf("failed to write additional tasks file: %v", err)
 	}
 
+	log.Printf("GitHub Actions setup configured using existing SSH keys from Terraform")
 	return nil
 }
 
-func (ds *DeploymentService) escapeYAMLString(s string) string {
-	// Replace any quotes with escaped quotes
-	s = strings.ReplaceAll(s, "\"", "\\\"")
-	return s
-}
+// func (ds *DeploymentService) escapeYAMLString(s string) string {
+// 	// Replace any quotes with escaped quotes
+// 	s = strings.ReplaceAll(s, "\"", "\\\"")
+// 	return s
+// }
 
-func (ds *DeploymentService) indentString(s, indent string) string {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	var result []string
-	for _, line := range lines {
-		result = append(result, indent+line)
-	}
-	return strings.Join(result, "\n")
-}
+// func (ds *DeploymentService) indentString(s, indent string) string {
+// 	lines := strings.Split(strings.TrimSpace(s), "\n")
+// 	var result []string
+// 	for _, line := range lines {
+// 		result = append(result, indent+line)
+// 	}
+// 	return strings.Join(result, "\n")
+// }
 
 func (ds *DeploymentService) runAdditionalAnsibleTasks(ansibleDir string) error {
 	additionalTasksPath := filepath.Join(ansibleDir, "github-actions-setup.yml")
