@@ -61,18 +61,21 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest, publicIP s
 	}
 
 	var additionalTasks strings.Builder
-	for _, cmd := range req.AdditionalCommands {
-		additionalTasks.WriteString(fmt.Sprintf(`
+for _, cmd := range req.AdditionalCommands {
+	additionalTasks.WriteString(fmt.Sprintf(`
 
     - name: Run additional command
       shell: |
         cd {{ django_project_path }}
-        source {{ django_project_path }}/../venv/bin/activate
+        source /home/azureuser/app/venv/bin/activate
+        export DJANGO_SETTINGS_MODULE="{{ django_settings_module }}"
+        export PYTHONPATH="/home/azureuser/app:$PYTHONPATH"
         %s
       args:
         executable: /bin/bash
       become_user: azureuser
-      environment: "{{ env_vars }}"`, cmd))
+      environment: "{{ env_vars }}"
+      ignore_errors: yes`, cmd))
 	}
 
 	serverType := "Gunicorn"
@@ -403,9 +406,11 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest, publicIP s
     - name: Create .env file for environment variables
       copy:
         content: |
+          {% if env_vars %}
           {% for key, value in env_vars.items() %}
           {{ key }}={{ value }}
           {% endfor %}
+          {% endif %}
         dest: /home/azureuser/app/.env
         owner: azureuser
         group: azureuser
@@ -636,24 +641,86 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest, publicIP s
         backup: yes
       notify: restart supervisor
 
-    - name: Create nginx configuration
+    - name: Create nginx configuration with rate limiting
       copy:
         content: |
+          # Rate limiting zones
+          limit_req_zone $binary_remote_addr zone=general:10m rate=30r/m;
+          limit_req_zone $binary_remote_addr zone=auth:10m rate=5r/m;
+          limit_req_zone $binary_remote_addr zone=api:10m rate=100r/m;
+          limit_req_zone $binary_remote_addr zone=static:10m rate=200r/m;
+          
+          # Connection limiting
+          limit_conn_zone $binary_remote_addr zone=addr:10m;
+          
           server {
               listen 80;
               server_name _;
               client_max_body_size 100M;
               
+              # Security headers
               add_header X-Frame-Options "SAMEORIGIN" always;
               add_header X-XSS-Protection "1; mode=block" always;
               add_header X-Content-Type-Options "nosniff" always;
               add_header Referrer-Policy "no-referrer-when-downgrade" always;
+              add_header X-Content-Security-Policy "default-src 'self'" always;
               
+              # Connection and rate limiting
+              limit_conn addr 10;
+              limit_req zone=general burst=20 nodelay;
+              
+              # Proxy settings
               proxy_connect_timeout 300s;
               proxy_send_timeout 300s;
               proxy_read_timeout 300s;
               proxy_buffering off;
               
+              # Authentication endpoints (login, register, password reset)
+              location ~* ^/(auth|login|register|password|api/auth)/ {
+                  limit_req zone=auth burst=3 nodelay;
+                  proxy_pass http://127.0.0.1:8000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_redirect off;
+              }
+              
+              # API endpoints
+              location ~* ^/api/ {
+                  limit_req zone=api burst=50 nodelay;
+                  proxy_pass http://127.0.0.1:8000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_redirect off;
+              }
+              
+              # Static files with higher rate limit
+              location /static/ {
+                  limit_req zone=static burst=100 nodelay;
+                  alias {{ django_project_path }}/staticfiles/;
+                  expires 30d;
+                  add_header Cache-Control "public, no-transform";
+              }
+              
+              # Media files
+              location /media/ {
+                  limit_req zone=static burst=100 nodelay;
+                  alias {{ django_project_path }}/media/;
+                  expires 30d;
+                  add_header Cache-Control "public, no-transform";
+              }
+              
+              # Health check endpoint (no rate limiting)
+              location /health/ {
+                  access_log off;
+                  return 200 "healthy\n";
+                  add_header Content-Type text/plain;
+              }
+              
+              # Default location for all other requests
               location / {
                   proxy_pass http://127.0.0.1:8000;
                   proxy_set_header Host $host;
@@ -663,22 +730,22 @@ func (ds *DeploymentService) generatePlaybook(req *DeploymentRequest, publicIP s
                   proxy_redirect off;
               }
               
-              location /static/ {
-                  alias {{ django_project_path }}/staticfiles/;
-                  expires 30d;
-                  add_header Cache-Control "public, no-transform";
+              # Block common exploit attempts
+              location ~* \.(php|asp|aspx|jsp)$ {
+                  return 444;
               }
               
-              location /media/ {
-                  alias {{ django_project_path }}/media/;
-                  expires 30d;
-                  add_header Cache-Control "public, no-transform";
+              # Block access to sensitive files
+              location ~* \.(htaccess|htpasswd|ini|log|sh|sql|conf)$ {
+                  deny all;
+                  return 404;
               }
               
-              location /health/ {
-                  access_log off;
-                  return 200 "healthy\n";
-                  add_header Content-Type text/plain;
+              # Custom error pages for rate limiting
+              error_page 429 @rate_limit;
+              location @rate_limit {
+                  add_header Content-Type text/plain always;
+                  return 429 "Too Many Requests - Rate limit exceeded. Please try again later.\n";
               }
           }
         dest: /etc/nginx/sites-available/django

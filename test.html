@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Django Deployment Monitor</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+        
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #555;
+        }
+        
+        input, textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+            box-sizing: border-box;
+        }
+        
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .checkbox-group input[type="checkbox"] {
+            width: auto;
+        }
+        
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: transform 0.2s;
+            width: 100%;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+        }
+        
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .logs-container {
+            margin-top: 30px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            max-height: 500px;
+            overflow-y: auto;
+            background: #1a1a1a;
+            color: #fff;
+        }
+        
+        .logs-header {
+            background: #333;
+            padding: 15px;
+            border-bottom: 1px solid #555;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .clear-logs-btn {
+            background: #dc3545;
+            padding: 5px 10px;
+            font-size: 12px;
+            width: auto;
+            transform: none;
+        }
+        
+        .clear-logs-btn:hover {
+            transform: none;
+            background: #c82333;
+        }
+        
+        .log-message {
+            padding: 8px 15px;
+            border-bottom: 1px solid #333;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            word-wrap: break-word;
+        }
+        
+        .log-timestamp {
+            color: #888;
+            font-size: 11px;
+            min-width: 80px;
+        }
+        
+        .log-level {
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: bold;
+            text-transform: uppercase;
+            min-width: 50px;
+            text-align: center;
+        }
+        
+        .log-level.info { background: #17a2b8; }
+        .log-level.success { background: #28a745; }
+        .log-level.warn { background: #ffc107; color: #000; }
+        .log-level.error { background: #dc3545; }
+        .log-level.system { background: #6c757d; }
+        
+        .log-step {
+            background: #495057;
+            color: white;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            min-width: 80px;
+            text-align: center;
+        }
+        
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+        
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #6c757d;
+        }
+        
+        .status-dot.connected { background: #28a745; }
+        .status-dot.deploying { background: #ffc107; }
+        .status-dot.error { background: #dc3545; }
+        .status-dot.completed { background: #28a745; }
+        .status-dot.reconnecting { background: #17a2b8; }
+        
+        .deployment-info {
+            font-size: 12px;
+            color: #666;
+        }
+
+        .debug-panel {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            border-left: 4px solid #17a2b8;
+        }
+
+        .debug-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #17a2b8;
+        }
+
+        .debug-info {
+            font-family: monospace;
+            font-size: 12px;
+            color: #666;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .deployment-result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 6px;
+            display: none;
+        }
+
+        .deployment-result.success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+
+        .deployment-result.error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+
+        .deployment-url {
+            font-weight: bold;
+            margin-top: 10px;
+        }
+
+        .deployment-url a {
+            color: #007bff;
+            text-decoration: none;
+        }
+
+        .deployment-url a:hover {
+            text-decoration: underline;
+        }
+
+        .reconnect-btn {
+            background: #17a2b8;
+            padding: 8px 15px;
+            font-size: 12px;
+            width: auto;
+            margin-left: 10px;
+        }
+
+        .reconnect-btn:hover {
+            background: #138496;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Django Deployment Monitor</h1>
+        
+        <div class="status-bar">
+            <div class="status-indicator">
+                <div class="status-dot" id="statusDot"></div>
+                <span id="statusText">Ready</span>
+            </div>
+            <div class="deployment-info" id="deploymentInfo"></div>
+        </div>
+        
+        <form id="deploymentForm">
+            <div class="form-group">
+                <label for="username">Username:</label>
+                <input type="text" id="username" name="username" required value="testuser">
+            </div>
+            
+            <div class="form-group">
+                <label for="repoUrl">Repository URL:</label>
+                <input type="url" id="repoUrl" name="repo_url" required value="https://github.com/username/django-app.git">
+            </div>
+            
+            <div class="form-group">
+                <label for="githubToken">GitHub Token:</label>
+                <input type="password" id="githubToken" name="github_token" required value="ghp_your_token_here">
+            </div>
+            
+            <div class="form-group">
+                <label for="additionalCommands">Additional Commands (one per line):</label>
+                <textarea id="additionalCommands" name="additional_commands" rows="3" placeholder="pip install -r requirements.txt&#10;python manage.py migrate"></textarea>
+            </div>
+            
+            <div class="form-group">
+                <label for="envVariables">Environment Variables (JSON format):</label>
+                <textarea id="envVariables" name="env_variables" rows="3" placeholder='{"DEBUG": "False", "SECRET_KEY": "your-secret-key"}'></textarea>
+            </div>
+            
+            <div class="form-group">
+                <div class="checkbox-group">
+                    <input type="checkbox" id="asgi" name="asgi">
+                    <label for="asgi">Enable ASGI</label>
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <div class="checkbox-group">
+                    <input type="checkbox" id="autoDeploy" name="auto_deploy" checked>
+                    <label for="autoDeploy">Enable Auto-Deploy</label>
+                </div>
+            </div>
+            
+            <button type="submit" id="deployButton">Start Deployment</button>
+        </form>
+
+        <div class="deployment-result" id="deploymentResult">
+            <div id="deploymentMessage"></div>
+            <div class="deployment-url" id="deploymentUrl"></div>
+        </div>
+        
+        <div class="logs-container" id="logsContainer" style="display: none;">
+            <div class="logs-header">
+                <span>Deployment Logs</span>
+                <div>
+                    <button type="button" class="reconnect-btn" id="reconnectBtn" onclick="reconnectToLogs()" style="display: none;">Reconnect</button>
+                    <button type="button" class="clear-logs-btn" onclick="clearLogs()">Clear</button>
+                </div>
+            </div>
+            <div id="logsContent"></div>
+        </div>
+
+        <div class="debug-panel" id="debugPanel" style="display: none;">
+            <div class="debug-title">Debug Information</div>
+            <div class="debug-info" id="debugInfo"></div>
+        </div>
+    </div>
+
+    <script>
+        let eventSource = null;
+        let currentDeploymentId = null;
+        let isDeploying = false;
+        let reconnectAttempts = 0;
+        let deploymentCompleted = false;
+        let finalPublicIP = null;
+        let reconnectTimer = null;
+        const maxReconnectAttempts = 10;
+        const reconnectDelay = 3000; // 3 seconds
+
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const deploymentInfo = document.getElementById('deploymentInfo');
+        const logsContainer = document.getElementById('logsContainer');
+        const logsContent = document.getElementById('logsContent');
+        const deployButton = document.getElementById('deployButton');
+        const form = document.getElementById('deploymentForm');
+        const debugPanel = document.getElementById('debugPanel');
+        const debugInfo = document.getElementById('debugInfo');
+        const deploymentResult = document.getElementById('deploymentResult');
+        const deploymentMessage = document.getElementById('deploymentMessage');
+        const deploymentUrl = document.getElementById('deploymentUrl');
+        const reconnectBtn = document.getElementById('reconnectBtn');
+
+        // Enable debug mode
+        const DEBUG_MODE = true;
+
+        function debugLog(message, data = null) {
+            if (DEBUG_MODE) {
+                console.log('[DEBUG]', message, data || '');
+                const timestamp = new Date().toLocaleTimeString();
+                const logEntry = data ? `${message} ${JSON.stringify(data)}` : message;
+                debugInfo.innerHTML += `<div>[${timestamp}] ${logEntry}</div>`;
+                debugPanel.style.display = 'block';
+                debugInfo.scrollTop = debugInfo.scrollHeight;
+            }
+        }
+
+        function updateStatus(status, message, info = '') {
+            statusDot.className = `status-dot ${status}`;
+            statusText.textContent = message;
+            deploymentInfo.textContent = info;
+            debugLog(`Status updated: ${status} - ${message} - ${info}`);
+        }
+
+        function showDeploymentResult(success, message, publicIP = null) {
+            deploymentResult.className = `deployment-result ${success ? 'success' : 'error'}`;
+            deploymentMessage.textContent = message;
+            
+            if (success && publicIP) {
+                deploymentUrl.innerHTML = `<strong>Your application is live at:</strong><br><a href="http://${publicIP}" target="_blank">http://${publicIP}</a>`;
+            } else {
+                deploymentUrl.innerHTML = '';
+            }
+            
+            deploymentResult.style.display = 'block';
+            debugLog(`Deployment result shown: ${success ? 'success' : 'error'} - ${message}`);
+        }
+
+        function addLogMessage(logData) {
+            const logElement = document.createElement('div');
+            logElement.className = 'log-message';
+            
+            const timestamp = logData.timestamp ? new Date(logData.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+            
+            logElement.innerHTML = `
+                <span class="log-timestamp">${timestamp}</span>
+                <span class="log-level ${logData.level || 'info'}">${logData.level || 'info'}</span>
+                ${logData.step ? `<span class="log-step">${logData.step}</span>` : ''}
+                <span class="log-text">${logData.message || 'No message'}</span>
+            `;
+            
+            logsContent.appendChild(logElement);
+            logsContent.scrollTop = logsContent.scrollHeight;
+            
+            debugLog(`Log added: ${logData.level} - ${logData.message}`);
+        }
+
+        function clearLogs() {
+            logsContent.innerHTML = '';
+            debugLog('Logs cleared');
+        }
+
+        function resetDeploymentState() {
+            isDeploying = false;
+            deploymentCompleted = false;
+            finalPublicIP = null;
+            currentDeploymentId = null;
+            reconnectAttempts = 0;
+            deployButton.disabled = false;
+            deployButton.textContent = 'Start Deployment';
+            reconnectBtn.style.display = 'none';
+            debugLog('Deployment state reset');
+        }
+
+        function connectToLogs(deploymentId) {
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            debugLog(`Attempting to connect to logs for deployment: ${deploymentId}`);
+            
+            const url = `http://localhost:8080/deploy/${deploymentId}/logs`;
+            eventSource = new EventSource(url);
+
+            eventSource.onopen = function(event) {
+                debugLog('EventSource connection opened', event);
+                updateStatus('connected', 'Connected to deployment logs');
+                reconnectAttempts = 0;
+                reconnectBtn.style.display = 'none';
+                
+                if (reconnectTimer) {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = null;
+                }
+            };
+
+            eventSource.onmessage = function(event) {
+                try {
+                    const logData = JSON.parse(event.data);
+                    debugLog('Received log message', logData);
+                    
+                    // Filter out heartbeat messages from display
+                    if (logData.level === 'system' && logData.message === 'heartbeat') {
+                        debugLog('Heartbeat received');
+                        return;
+                    }
+                    
+                    // Handle system messages
+                    if (logData.level === 'system') {
+                        if (logData.message === 'DEPLOYMENT_COMPLETE') {
+                            deploymentCompleted = true;
+                            updateStatus('completed', 'Deployment completed');
+                            deployButton.disabled = false;
+                            deployButton.textContent = 'Start New Deployment';
+                            
+                            // Extract public IP from last success message
+                            const logMessages = logsContent.querySelectorAll('.log-message');
+                            for (let i = logMessages.length - 1; i >= 0; i--) {
+                                const logText = logMessages[i].querySelector('.log-text').textContent;
+                                if (logText.includes('Public IP:')) {
+                                    const ipMatch = logText.match(/Public IP:\s*([0-9.]+)/);
+                                    if (ipMatch) {
+                                        finalPublicIP = ipMatch[1];
+                                        showDeploymentResult(true, 'Deployment completed successfully!', finalPublicIP);
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if (!finalPublicIP) {
+                                showDeploymentResult(true, 'Deployment completed successfully!');
+                            }
+                            
+                            debugLog('Deployment completed, closing connection');
+                            setTimeout(() => {
+                                if (eventSource) {
+                                    eventSource.close();
+                                }
+                            }, 2000);
+                            return;
+                        } else if (logData.message.startsWith('Connected to log stream')) {
+                            addLogMessage({
+                                level: 'info',
+                                message: 'Connected to deployment logs',
+                                timestamp: logData.timestamp,
+                                step: 'connection'
+                            });
+                            return;
+                        }
+                    }
+                    
+                    addLogMessage(logData);
+                    
+                    // Check for error messages
+                    if (logData.level === 'error') {
+                        if (logData.message.includes('Deployment failed')) {
+                            updateStatus('error', 'Deployment failed');
+                            showDeploymentResult(false, logData.message);
+                            deployButton.disabled = false;
+                            deployButton.textContent = 'Retry Deployment';
+                        }
+                    }
+                    
+                } catch (error) {
+                    debugLog('Error parsing log message', error);
+                    console.error('Error parsing SSE data:', error);
+                }
+            };
+
+            eventSource.onerror = function(event) {
+                debugLog('EventSource error', event);
+                console.error('EventSource error:', event);
+                
+                if (!deploymentCompleted && reconnectAttempts < maxReconnectAttempts) {
+                    updateStatus('reconnecting', `Connection lost, reconnecting... (${reconnectAttempts + 1}/${maxReconnectAttempts})`);
+                    reconnectBtn.style.display = 'inline-block';
+                    
+                    reconnectTimer = setTimeout(() => {
+                        reconnectAttempts++;
+                        connectToLogs(currentDeploymentId);
+                    }, reconnectDelay);
+                } else if (reconnectAttempts >= maxReconnectAttempts) {
+                    updateStatus('error', 'Connection failed after multiple attempts');
+                    reconnectBtn.style.display = 'inline-block';
+                    eventSource.close();
+                } else {
+                    updateStatus('completed', 'Deployment finished');
+                    eventSource.close();
+                }
+            };
+        }
+
+        function reconnectToLogs() {
+            if (currentDeploymentId) {
+                debugLog('Manual reconnection triggered');
+                reconnectAttempts = 0;
+                connectToLogs(currentDeploymentId);
+            }
+        }
+
+        form.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            if (isDeploying) {
+                debugLog('Deployment already in progress, ignoring submit');
+                return;
+            }
+            
+            debugLog('Form submitted, starting deployment');
+            
+            // Reset previous deployment state
+            deploymentResult.style.display = 'none';
+            clearLogs();
+            resetDeploymentState();
+            
+            const formData = new FormData(form);
+            const deploymentData = {
+                username: formData.get('username'),
+                repo_url: formData.get('repo_url'),
+                github_token: formData.get('github_token'),
+                additional_commands: formData.get('additional_commands') ? formData.get('additional_commands').split('\n').filter(cmd => cmd.trim()) : [],
+                env_variables: {},
+                asgi: formData.has('asgi'),
+                auto_deploy: formData.has('auto_deploy')
+            };
+            
+            // Parse environment variables if provided
+            const envVarsText = formData.get('env_variables');
+            if (envVarsText && envVarsText.trim()) {
+                try {
+                    deploymentData.env_variables = JSON.parse(envVarsText);
+                } catch (error) {
+                    debugLog('Error parsing environment variables', error);
+                    alert('Invalid JSON format for environment variables');
+                    return;
+                }
+            }
+            
+            debugLog('Deployment data prepared', deploymentData);
+            
+            // Update UI
+            isDeploying = true;
+            deployButton.disabled = true;
+            deployButton.textContent = 'Deploying...';
+            updateStatus('deploying', 'Starting deployment...');
+            logsContainer.style.display = 'block';
+            
+            try {
+                const response = await fetch('http://localhost:8080/deploy', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(deploymentData)
+                });
+                
+                const result = await response.json();
+                debugLog('Deployment API response', result);
+                
+                if (result.success) {
+                    currentDeploymentId = result.deployment_id;
+                    updateStatus('deploying', 'Deployment started', `ID: ${currentDeploymentId}`);
+                    
+                    // Connect to logs stream
+                    setTimeout(() => {
+                        connectToLogs(currentDeploymentId);
+                    }, 1000);
+                    
+                } else {
+                    throw new Error(result.error || 'Deployment failed to start');
+                }
+                
+            } catch (error) {
+                debugLog('Deployment start error', error);
+                console.error('Deployment error:', error);
+                updateStatus('error', 'Failed to start deployment');
+                showDeploymentResult(false, `Failed to start deployment: ${error.message}`);
+                resetDeploymentState();
+            }
+        });
+
+        // Initialize the page
+        updateStatus('ready', 'Ready to deploy');
+        debugLog('Page initialized');
+    </script>
+</body>
+</html>
