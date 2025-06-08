@@ -540,7 +540,6 @@ func (ds *DeploymentService) runAdditionalAnsibleTasks(ansibleDir string, broadc
 	cmd := exec.Command("ansible-playbook", "-i", "inventory.ini", "github-actions-setup.yml", "-v")
 	cmd.Dir = ansibleDir
 
-	// Set up pipes for stdout and stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("failed to create stdout pipe: %v", err)
@@ -550,36 +549,27 @@ func (ds *DeploymentService) runAdditionalAnsibleTasks(ansibleDir string, broadc
 		return fmt.Errorf("failed to create stderr pipe: %v", err)
 	}
 
-	// Start command
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start command: %v", err)
 	}
 
-	// Create a channel to coordinate between stdout and stderr goroutines
 	done := make(chan bool)
 
-	// Handle stdout in a goroutine
 	go func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
-			// Try to parse the line based on common Ansible output patterns
 			switch {
 			case strings.Contains(line, "TASK ["):
-				// Extract task name and send as info
 				taskName := strings.TrimPrefix(strings.TrimSuffix(strings.TrimPrefix(line, "TASK ["), "]"), " ")
 				ds.broadcastLog(broadcaster, deploymentID, "info", fmt.Sprintf("GitHub Actions setup: %s", taskName), "github")
 			case strings.Contains(line, "ok: ["):
-				// Extract successful task result
 				ds.broadcastLog(broadcaster, deploymentID, "success", line, "github")
 			case strings.Contains(line, "changed: ["):
-				// Extract changed task result
 				ds.broadcastLog(broadcaster, deploymentID, "info", line, "github")
 			case strings.Contains(line, "skipping: ["):
-				// Extract skipped task result
 				ds.broadcastLog(broadcaster, deploymentID, "info", line, "github")
 			default:
-				// Send other output as debug level if it's not empty
 				if strings.TrimSpace(line) != "" {
 					ds.broadcastLog(broadcaster, deploymentID, "debug", line, "github")
 				}
@@ -588,7 +578,7 @@ func (ds *DeploymentService) runAdditionalAnsibleTasks(ansibleDir string, broadc
 		done <- true
 	}()
 
-	// Handle stderr in a goroutine
+
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
@@ -602,11 +592,9 @@ func (ds *DeploymentService) runAdditionalAnsibleTasks(ansibleDir string, broadc
 		done <- true
 	}()
 
-	// Wait for both stdout and stderr to be processed
 	<-done
 	<-done
 
-	// Wait for command to complete
 	if err := cmd.Wait(); err != nil {
 		ds.broadcastLog(broadcaster, deploymentID, "error", fmt.Sprintf("GitHub Actions setup tasks failed: %v", err), "github")
 		return fmt.Errorf("GitHub Actions setup tasks failed: %v", err)

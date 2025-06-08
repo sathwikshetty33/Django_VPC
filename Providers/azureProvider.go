@@ -469,7 +469,7 @@ func (a *AzureProvider) InitTerraform(path string) error {
 func (a *AzureProvider) ApplyTerraform(path string) error {
 	a.broadcastLog("info", "Applying Terraform configuration (this may take a few minutes)...", "terraform")
 	
-	// Show progress indicator
+
 	fmt.Print("Deploying resources")
 	go func() {
 		for i := 0; i < 30; i++ {
@@ -482,14 +482,14 @@ func (a *AzureProvider) ApplyTerraform(path string) error {
 	cmd.Dir = path
 
 	output, err := cmd.CombinedOutput()
-	fmt.Println() // New line after progress dots
+	fmt.Println() 
 	
 	if err != nil {
 		a.broadcastLog("error", fmt.Sprintf("Terraform apply failed: %v\nOutput: %s", err, string(output)), "terraform")
 		return fmt.Errorf("terraform apply failed: %v", err)
 	}
 
-	// Parse and show important outputs from terraform apply
+
 	outputStr := string(output)
 	if strings.Contains(outputStr, "Apply complete!") {
 		a.broadcastLog("success", "Infrastructure deployment completed successfully", "terraform")
@@ -572,11 +572,9 @@ echo "=== Audit Complete ==="
 	return nil
 }
 
-// PrintDeploymentSummary prints a formatted summary of the deployment
 func (a *AzureProvider) PrintDeploymentSummary(path string) error {
 	a.broadcastLog("info", "Generating deployment summary...", "summary")
-	
-	// Get outputs
+
 	publicIP, _ := a.GetTerraformOutput(path, "public_ip")
 	resourceGroup, _ := a.GetTerraformOutput(path, "resource_group")
 	vmName, _ := a.GetTerraformOutput(path, "vm_name")
