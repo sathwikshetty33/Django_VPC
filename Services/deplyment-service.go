@@ -1,4 +1,3 @@
-
 package services
 
 import (
@@ -6,7 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sathwikshetty33/Django-vpc/Providers"
+	providers "sathwikshetty33/Django-vpc/Providers"
 	"strings"
 	"time"
 )
@@ -51,7 +50,7 @@ func (ds *DeploymentService) broadcastLog(broadcaster LogBroadcaster, deployment
 
 func (ds *DeploymentService) Deploy(req *DeploymentRequest, deploymentID string, broadcaster LogBroadcaster) (string, error) {
 	ds.broadcastLog(broadcaster, deploymentID, "info", "Extracting repository name...", "setup")
-	
+
 	repoName, err := extractRepoName(req.RepoURL)
 	if err != nil {
 		ds.broadcastLog(broadcaster, deploymentID, "error", fmt.Sprintf("Failed to extract repo name: %v", err), "setup")
@@ -63,9 +62,9 @@ func (ds *DeploymentService) Deploy(req *DeploymentRequest, deploymentID string,
 	basePath := filepath.Join("deployments", req.Username, repoName)
 	timestamp := time.Now().Format("20060102-150405")
 	workDir := filepath.Join(basePath, timestamp)
-	
+
 	ds.broadcastLog(broadcaster, deploymentID, "info", fmt.Sprintf("Creating deployment directory: %s", workDir), "setup")
-	
+
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		ds.broadcastLog(broadcaster, deploymentID, "error", fmt.Sprintf("Failed to create work directory: %v", err), "setup")
 		return "", fmt.Errorf("failed to create work directory: %v", err)
@@ -148,7 +147,7 @@ func (ds *DeploymentService) Deploy(req *DeploymentRequest, deploymentID string,
 	ds.broadcastLog(broadcaster, deploymentID, "info", "Verifying SSH keys...", "ssh")
 	azurePrivateKeyPath := filepath.Join(terraformDir, "azure_vm_key")
 	azurePublicKeyPath := filepath.Join(terraformDir, "azure_vm_key.pub")
-	
+
 	if _, err := os.Stat(azurePrivateKeyPath); err != nil {
 		ds.broadcastLog(broadcaster, deploymentID, "error", fmt.Sprintf("Private key not found at %s: %v", azurePrivateKeyPath, err), "ssh")
 		return "", fmt.Errorf("Private key not found at %s: %v", azurePrivateKeyPath, err)
@@ -183,18 +182,18 @@ func (ds *DeploymentService) Deploy(req *DeploymentRequest, deploymentID string,
 		ds.broadcastLog(broadcaster, deploymentID, "error", fmt.Sprintf("Failed to run ansible playbook: %v", err), "ansible")
 		return "", fmt.Errorf("failed to run ansible playbook: %v", err)
 	}
-	ds.broadcastLog(broadcaster, deploymentID, "success", "Ansible playbook executed successfully", "ansible")
+	ds.broadcastLog(broadcaster, deploymentID, "success", "Ansible playbook execution completed successfully", "ansible")
 
 	if req.AutoDeploy {
 		ds.broadcastLog(broadcaster, deploymentID, "info", "Setting up GitHub Actions auto-deployment...", "github")
-		if err := ds.setupGitHubActionsOnServer(ansibleDir, req, publicIP, terraformDir); err != nil {
+		if err := ds.setupGitHubActionsOnServer(ansibleDir, req, publicIP, terraformDir, broadcaster, deploymentID); err != nil {
 			ds.broadcastLog(broadcaster, deploymentID, "warn", fmt.Sprintf("Failed to setup GitHub Actions: %v", err), "github")
 		} else {
 			ds.broadcastLog(broadcaster, deploymentID, "success", "GitHub Actions setup completed", "github")
 		}
 
 		ds.broadcastLog(broadcaster, deploymentID, "info", "Running additional GitHub Actions setup tasks...", "github")
-		if err := ds.runAdditionalAnsibleTasks(ansibleDir); err != nil {
+		if err := ds.runAdditionalAnsibleTasks(ansibleDir, broadcaster, deploymentID); err != nil {
 			ds.broadcastLog(broadcaster, deploymentID, "warn", fmt.Sprintf("Failed to run GitHub Actions setup tasks: %v", err), "github")
 		} else {
 			ds.broadcastLog(broadcaster, deploymentID, "success", "Additional GitHub Actions tasks completed", "github")
@@ -206,19 +205,19 @@ func (ds *DeploymentService) Deploy(req *DeploymentRequest, deploymentID string,
 }
 
 func (ds *DeploymentService) testSSHConnectivity(publicIP, privateKeyPath string, broadcaster LogBroadcaster, deploymentID string) error {
-	cmd := exec.Command("ssh", 
+	cmd := exec.Command("ssh",
 		"-i", privateKeyPath,
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "ConnectTimeout=10",
 		fmt.Sprintf("azureuser@%s", publicIP),
 		"echo 'SSH test successful'")
-	
+
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("SSH test failed: %v, output: %s", err, string(output))
 	}
-	
+
 	ds.broadcastLog(broadcaster, deploymentID, "info", fmt.Sprintf("SSH test output: %s", string(output)), "ssh")
 	return nil
 }

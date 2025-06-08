@@ -5,30 +5,121 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
-	"fmt"
-	"golang.org/x/crypto/ssh"
+	"fmt"	
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/template"
+	"time"
+
+	"github.com/joho/godotenv"
+	"golang.org/x/crypto/ssh"
 )
 
-type AzureProvider struct {
-	ResourceGroup string
-	Location      string
-	VMSize        string
-	VMName        string
-	Path_         string
-	PublicKeyPath string
-	PublicKeyContent string // Add this field to store the actual key content
+// LogMessage represents a log entry
+type LogMessage struct {
+	Level     string
+	Message   string
+	Timestamp string
+	Step      string
 }
 
-// Updated Terraform template - using local_file resource and public key content directly
+// LogBroadcaster interface for broadcasting logs
+type LogBroadcaster interface {
+	BroadcastLog(deploymentID string, logMsg LogMessage)
+}
+
+func init() {
+	if err := godotenv.Load(); err != nil {
+		fmt.Printf("Warning: Error loading .env file: %v\n", err)
+	}
+}
+
+type AzureProvider struct {
+	ResourceGroup    string
+	Location         string
+	VMSize           string
+	VMName           string
+	Path_            string
+	PublicKeyPath    string
+	PublicKeyContent string
+	broadcaster      LogBroadcaster
+	deploymentID     string
+}
+
+func (a *AzureProvider) SetLogger(broadcaster LogBroadcaster, deploymentID string) {
+	a.broadcaster = broadcaster
+	a.deploymentID = deploymentID
+}
+
+func (a *AzureProvider) broadcastLog(level, message, step string) {
+	// Create log message
+	logMsg := LogMessage{
+		Level:     level,
+		Message:   message,
+		Step:      step,
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+	
+	// Print to console with color coding
+	a.printLog(logMsg)
+	
+	// Broadcast to external logger if available
+	if a.broadcaster != nil {
+		a.broadcaster.BroadcastLog(a.deploymentID, logMsg)
+	}
+}
+
+func (a *AzureProvider) printLog(logMsg LogMessage) {
+	timestamp := time.Now().Format("15:04:05")
+	
+	// Color codes for different log levels
+	var colorCode string
+	var levelPrefix string
+	
+	switch strings.ToLower(logMsg.Level) {
+	case "error":
+		colorCode = "\033[31m" // Red
+		levelPrefix = "ERROR"
+	case "warning", "warn":
+		colorCode = "\033[33m" // Yellow
+		levelPrefix = "WARN "
+	case "success":
+		colorCode = "\033[32m" // Green
+		levelPrefix = "SUCCESS"
+	case "info":
+		colorCode = "\033[36m" // Cyan
+		levelPrefix = "INFO"
+	case "debug":
+		colorCode = "\033[37m" // White
+		levelPrefix = "DEBUG"
+	default:
+		colorCode = "\033[0m"  // Reset
+		levelPrefix = "LOG  "
+	}
+	
+	resetCode := "\033[0m" // Reset color
+	
+	// Format: [timestamp] [LEVEL] [step] message
+	fmt.Printf("%s[%s] [%s] [%s] %s%s\n", 
+		colorCode, 
+		timestamp, 
+		levelPrefix, 
+		strings.ToUpper(logMsg.Step), 
+		logMsg.Message, 
+		resetCode)
+}
+
 const azureTfTemplate = `
 provider "azurerm" {
   features {}
-  subscription_id = "145296c1-8df7-4169-9ff3-7858d9aeea61"
+  subscription_id = "${var.subscription_id}"
+}
+
+variable "subscription_id" {
+  description = "Azure subscription ID"
+  type        = string
 }
 
 # Local file resources for SSH keys
@@ -271,7 +362,6 @@ func generateSSHKeyPair() (string, string, error) {
 	}
 	privateKeyBytes := pem.EncodeToMemory(privateKeyPEM)
 
-	// Generate public key
 	publicKey, err := ssh.NewPublicKey(&privateKey.PublicKey)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to generate public key: %v", err)
@@ -283,108 +373,166 @@ func generateSSHKeyPair() (string, string, error) {
 }
 
 func (a *AzureProvider) GenerateSSHKeys(path string) (string, string, error) {
+	a.broadcastLog("info", "Generating SSH key pair...", "ssh")
 	publicKeyContent, privateKeyContent, err := generateSSHKeyPair()
 	if err != nil {
+		a.broadcastLog("error", fmt.Sprintf("Failed to generate SSH keys: %v", err), "ssh")
 		return "", "", fmt.Errorf("failed to generate SSH keys: %v", err)
 	}
 
-	// Store the content in the struct for use in Terraform variables
 	a.PublicKeyContent = publicKeyContent
+	a.broadcastLog("info", "Writing SSH keys to files...", "ssh")
 
-	// Also write to files for direct access
 	publicKeyPath := filepath.Join(path, "azure_vm_key.pub")
 	if err := os.WriteFile(publicKeyPath, []byte(publicKeyContent), 0644); err != nil {
+		a.broadcastLog("error", fmt.Sprintf("Failed to write public key: %v", err), "ssh")
 		return "", "", fmt.Errorf("failed to write public key: %v", err)
 	}
 
 	privateKeyPath := filepath.Join(path, "azure_vm_key")
 	if err := os.WriteFile(privateKeyPath, []byte(privateKeyContent), 0600); err != nil {
+		a.broadcastLog("error", fmt.Sprintf("Failed to write private key: %v", err), "ssh")
 		return "", "", fmt.Errorf("failed to write private key: %v", err)
 	}
 
 	a.PublicKeyPath = publicKeyPath
-
-	fmt.Printf("SSH keys generated successfully:\n")
-	fmt.Printf("  Private key: %s\n", privateKeyPath)
-	fmt.Printf("  Public key: %s\n", publicKeyPath)
-	fmt.Printf("\nTo connect to the VM, use: ssh -i %s azureuser@<VM_IP>\n", privateKeyPath)
+	a.broadcastLog("success", fmt.Sprintf("SSH keys generated successfully at %s", path), "ssh")
 
 	return publicKeyContent, privateKeyContent, nil
 }
 
 func (a *AzureProvider) GenerateTerraformConfig(path string) error {
-	// Generate SSH keys first and get the content
+	a.broadcastLog("info", "Generating Terraform configuration...", "terraform")
+
 	publicKeyContent, privateKeyContent, err := a.GenerateSSHKeys(path)
 	if err != nil {
 		return err
 	}
 
-	// Create main.tf file
 	filePath := filepath.Join(path, "main.tf")
 	file, err := os.Create(filePath)
 	if err != nil {
+		a.broadcastLog("error", fmt.Sprintf("Failed to create main.tf: %v", err), "terraform")
 		return err
 	}
 	defer file.Close()
 
 	tmpl, err := template.New("azure").Parse(azureTfTemplate)
 	if err != nil {
+		a.broadcastLog("error", fmt.Sprintf("Failed to parse Terraform template: %v", err), "terraform")
 		return err
 	}
 
 	if err := tmpl.Execute(file, a); err != nil {
+		a.broadcastLog("error", fmt.Sprintf("Failed to execute Terraform template: %v", err), "terraform")
 		return err
 	}
 
-	// Create terraform.tfvars file with SSH key content
+	a.broadcastLog("info", "Reading Azure subscription ID from environment...", "terraform")
+	subscriptionID := os.Getenv("AZURE_SUBSCRIPTION_ID")
+	if subscriptionID == "" {
+		a.broadcastLog("error", "AZURE_SUBSCRIPTION_ID environment variable is not set", "terraform")
+		return fmt.Errorf("AZURE_SUBSCRIPTION_ID environment variable is not set")
+	}
+
 	tfvarsPath := filepath.Join(path, "terraform.tfvars")
-	tfvarsContent := fmt.Sprintf(`private_key_content = %q
+	tfvarsContent := fmt.Sprintf(`subscription_id = %q
+private_key_content = %q
 public_key_content = %q
-`, privateKeyContent, publicKeyContent)
+`, subscriptionID, privateKeyContent, publicKeyContent)
 
 	if err := os.WriteFile(tfvarsPath, []byte(tfvarsContent), 0600); err != nil {
+		a.broadcastLog("error", fmt.Sprintf("Failed to write terraform.tfvars: %v", err), "terraform")
 		return fmt.Errorf("failed to write terraform.tfvars: %v", err)
 	}
 
+	a.broadcastLog("success", "Terraform configuration generated successfully", "terraform")
 	return nil
 }
 
 func (a *AzureProvider) InitTerraform(path string) error {
+	a.broadcastLog("info", "Initializing Terraform...", "terraform")
 	cmd := exec.Command("terraform", "init")
 	cmd.Dir = path
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		a.broadcastLog("error", fmt.Sprintf("Terraform init failed: %v\nOutput: %s", err, string(output)), "terraform")
+		return fmt.Errorf("terraform init failed: %v", err)
+	}
+
+	a.broadcastLog("debug", fmt.Sprintf("Terraform init output:\n%s", string(output)), "terraform")
+	a.broadcastLog("success", "Terraform initialized successfully", "terraform")
+	return nil
 }
 
 func (a *AzureProvider) ApplyTerraform(path string) error {
+	a.broadcastLog("info", "Applying Terraform configuration (this may take a few minutes)...", "terraform")
+	
+	// Show progress indicator
+	fmt.Print("Deploying resources")
+	go func() {
+		for i := 0; i < 30; i++ {
+			time.Sleep(2 * time.Second)
+			fmt.Print(".")
+		}
+	}()
+	
 	cmd := exec.Command("terraform", "apply", "-auto-approve")
 	cmd.Dir = path
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+
+	output, err := cmd.CombinedOutput()
+	fmt.Println() // New line after progress dots
+	
+	if err != nil {
+		a.broadcastLog("error", fmt.Sprintf("Terraform apply failed: %v\nOutput: %s", err, string(output)), "terraform")
+		return fmt.Errorf("terraform apply failed: %v", err)
+	}
+
+	// Parse and show important outputs from terraform apply
+	outputStr := string(output)
+	if strings.Contains(outputStr, "Apply complete!") {
+		a.broadcastLog("success", "Infrastructure deployment completed successfully", "terraform")
+	}
+	
+	a.broadcastLog("debug", fmt.Sprintf("Terraform apply output:\n%s", outputStr), "terraform")
+	return nil
 }
 
 func (a *AzureProvider) GetTerraformOutput(path, key string) (string, error) {
+	a.broadcastLog("info", fmt.Sprintf("Getting Terraform output for key: %s", key), "terraform")
 	cmd := exec.Command("terraform", "output", "-raw", key)
 	cmd.Dir = path
-	out, err := cmd.Output()
+
+	output, err := cmd.Output()
 	if err != nil {
+		a.broadcastLog("error", fmt.Sprintf("Failed to get Terraform output %s: %v", key, err), "terraform")
 		return "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+
+	value := strings.TrimSpace(string(output))
+	a.broadcastLog("success", fmt.Sprintf("Retrieved %s: %s", key, value), "terraform")
+	return value, nil
 }
 
 func (a *AzureProvider) WriteInventory(path, ip string) error {
+	a.broadcastLog("info", "Writing Ansible inventory file...", "ansible")
 	privateKeyPath := filepath.Join(path, "azure_vm_key")
 	content := fmt.Sprintf(`[azure]
 %s ansible_user=azureuser ansible_ssh_private_key_file=%s ansible_connection=ssh ansible_ssh_common_args='-o StrictHostKeyChecking=no'
 `, ip, privateKeyPath)
-	return os.WriteFile(filepath.Join(path, "inventory.ini"), []byte(content), 0644)
+
+	if err := os.WriteFile(filepath.Join(path, "inventory.ini"), []byte(content), 0644); err != nil {
+		a.broadcastLog("error", fmt.Sprintf("Failed to write inventory file: %v", err), "ansible")
+		return err
+	}
+
+	a.broadcastLog("success", "Ansible inventory file created successfully", "ansible")
+	return nil
 }
 
-// CreateSecurityAuditScript creates a script to audit VM security
 func (a *AzureProvider) CreateSecurityAuditScript(path string) error {
+	a.broadcastLog("info", "Creating security audit script...", "security")
 	script := `#!/bin/bash
 # Azure VM Security Audit Script
 
@@ -416,19 +564,54 @@ echo "=== Audit Complete ==="
 `
 	scriptPath := filepath.Join(path, "security_audit.sh")
 	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		a.broadcastLog("error", fmt.Sprintf("Failed to create security audit script: %v", err), "security")
 		return fmt.Errorf("failed to create security audit script: %v", err)
 	}
-	
-	fmt.Printf("Security audit script created: %s\n", scriptPath)
+
+	a.broadcastLog("success", "Security audit script created successfully", "security")
 	return nil
 }
 
-// Helper function to create a minimal Azure provider instance optimized for free tier
+// PrintDeploymentSummary prints a formatted summary of the deployment
+func (a *AzureProvider) PrintDeploymentSummary(path string) error {
+	a.broadcastLog("info", "Generating deployment summary...", "summary")
+	
+	// Get outputs
+	publicIP, _ := a.GetTerraformOutput(path, "public_ip")
+	resourceGroup, _ := a.GetTerraformOutput(path, "resource_group")
+	vmName, _ := a.GetTerraformOutput(path, "vm_name")
+	sshCommand, _ := a.GetTerraformOutput(path, "ssh_connection_command")
+	
+	fmt.Printf("\n" + strings.Repeat("=", 60) + "\n")
+	fmt.Printf("🚀 AZURE DEPLOYMENT SUMMARY\n")
+	fmt.Printf(strings.Repeat("=", 60) + "\n")
+	fmt.Printf("📍 Resource Group: %s\n", resourceGroup)
+	fmt.Printf("💻 VM Name: %s\n", vmName)
+	fmt.Printf("📍 Location: %s\n", a.Location)
+	fmt.Printf("📊 VM Size: %s\n", a.VMSize)
+	fmt.Printf("🌐 Public IP: %s\n", publicIP)
+	fmt.Printf(strings.Repeat("-", 60) + "\n")
+	fmt.Printf("🔑 SSH Connection:\n")
+	fmt.Printf("   %s\n", sshCommand)
+	fmt.Printf(strings.Repeat("-", 60) + "\n")
+	fmt.Printf("📁 Generated Files:\n")
+	fmt.Printf("   • main.tf (Terraform configuration)\n")
+	fmt.Printf("   • terraform.tfvars (Variables)\n")
+	fmt.Printf("   • azure_vm_key (Private SSH key)\n")
+	fmt.Printf("   • azure_vm_key.pub (Public SSH key)\n")
+	fmt.Printf("   • inventory.ini (Ansible inventory)\n")
+	fmt.Printf("   • security_audit.sh (Security audit script)\n")
+	fmt.Printf(strings.Repeat("=", 60) + "\n\n")
+	
+	a.broadcastLog("success", "Deployment completed successfully!", "summary")
+	return nil
+}
+
 func NewMinimalAzureProvider(resourceGroup, vmName string) *AzureProvider {
 	return &AzureProvider{
 		ResourceGroup: resourceGroup,
-		Location:      "East US",        
-		VMSize:        "Standard_B1ls", 
+		Location:      "East US",
+		VMSize:        "Standard_B1ls",
 		VMName:        vmName,
 	}
 }
@@ -437,7 +620,7 @@ func NewAzureProviderB1s(resourceGroup, vmName string) *AzureProvider {
 	return &AzureProvider{
 		ResourceGroup: resourceGroup,
 		Location:      "East US",
-		VMSize:        "Standard_B1s",   
+		VMSize:        "Standard_B1s",
 		VMName:        vmName,
 	}
 }

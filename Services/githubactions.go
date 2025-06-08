@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
@@ -42,12 +43,12 @@ func extractRepoName(repoURL string) (string, error) {
 
 	path := strings.TrimPrefix(parsedURL.Path, "/")
 	path = strings.TrimSuffix(path, ".git")
-	
+
 	parts := strings.Split(path, "/")
 	if len(parts) < 2 {
 		return "", fmt.Errorf("invalid repository URL format")
 	}
-	
+
 	return parts[len(parts)-1], nil
 }
 
@@ -59,12 +60,12 @@ func (ds *DeploymentService) extractOwnerAndRepo(repoURL string) (string, string
 
 	path := strings.TrimPrefix(parsedURL.Path, "/")
 	path = strings.TrimSuffix(path, ".git")
-	
+
 	parts := strings.Split(path, "/")
 	if len(parts) < 2 {
 		return "", "", fmt.Errorf("invalid repository URL format")
 	}
-	
+
 	return parts[0], parts[1], nil
 }
 
@@ -92,32 +93,32 @@ func (ds *DeploymentService) generateSSHKeyPair() (string, string, error) {
 
 func (ds *DeploymentService) getGitHubPublicKey(owner, repo, token string) (*GitHubPublicKey, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/secrets/public-key", owner, repo)
-	
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
-	
+
 	req.Header.Set("Authorization", fmt.Sprintf("token %s", token))
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	
+
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch public key: %v", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("GitHub API error (status %d): %s", resp.StatusCode, string(body))
 	}
-	
+
 	var publicKey GitHubPublicKey
 	if err := json.NewDecoder(resp.Body).Decode(&publicKey); err != nil {
 		return nil, fmt.Errorf("failed to decode public key response: %v", err)
 	}
-	
+
 	return &publicKey, nil
 }
 
@@ -150,7 +151,6 @@ func (ds *DeploymentService) encryptSecret(secretValue, publicKeyStr string) (st
 	nonce := new([24]byte)
 	copy(nonce[:], nonceHash.Sum(nil))
 
-
 	encrypted := box.Seal(pubKey[:], []byte(secretValue), nonce, recipientKey, privKey)
 
 	return base64.StdEncoding.EncodeToString(encrypted), nil
@@ -161,79 +161,100 @@ func (ds *DeploymentService) setGitHubSecret(owner, repo, secretName, secretValu
 	if err != nil {
 		return fmt.Errorf("failed to encrypt secret: %v", err)
 	}
-	
+
 	secret := GitHubSecret{
 		EncryptedValue: encryptedValue,
 		KeyID:          publicKey.KeyID,
 	}
-	
+
 	secretJSON, err := json.Marshal(secret)
 	if err != nil {
 		return fmt.Errorf("failed to marshal secret: %v", err)
 	}
-	
+
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/secrets/%s", owner, repo, secretName)
-	
+
 	req, err := http.NewRequest("PUT", url, bytes.NewBuffer(secretJSON))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %v", err)
 	}
-	
+
 	req.Header.Set("Authorization", fmt.Sprintf("token %s", token))
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to set secret: %v", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("GitHub API error setting secret %s (status %d): %s", secretName, resp.StatusCode, string(body))
 	}
-	
+
 	log.Printf("Successfully set GitHub secret: %s", secretName)
 	return nil
 }
 
-func (ds *DeploymentService) setupGitHubSecrets(req *DeploymentRequest, privateKey string) error {
+func (ds *DeploymentService) setupGitHubSecrets(req *DeploymentRequest, privateKey string, broadcaster LogBroadcaster, deploymentID string) error {
 	if req.GithubToken == "" {
+		ds.broadcastLog(broadcaster, deploymentID, "error", "GitHub token is required for setting up secrets", "github")
 		return fmt.Errorf("GitHub token is required for setting up secrets")
 	}
-	
+
+	ds.broadcastLog(broadcaster, deploymentID, "info", "Extracting repository information...", "github")
 	owner, repo, err := ds.extractOwnerAndRepo(req.RepoURL)
 	if err != nil {
+		ds.broadcastLog(broadcaster, deploymentID, "error", fmt.Sprintf("Failed to extract repository info: %v", err), "github")
 		return fmt.Errorf("failed to extract owner and repo from URL: %v", err)
 	}
-	
+	ds.broadcastLog(broadcaster, deploymentID, "success", fmt.Sprintf("Working with repository: %s/%s", owner, repo), "github")
+
+	ds.broadcastLog(broadcaster, deploymentID, "info", "Fetching GitHub public key for secret encryption...", "github")
 	publicKey, err := ds.getGitHubPublicKey(owner, repo, req.GithubToken)
 	if err != nil {
+		ds.broadcastLog(broadcaster, deploymentID, "error", fmt.Sprintf("Failed to get GitHub public key: %v", err), "github")
 		return fmt.Errorf("failed to get GitHub public key: %v", err)
 	}
-	
+	ds.broadcastLog(broadcaster, deploymentID, "success", "GitHub public key retrieved successfully", "github")
+
+	ds.broadcastLog(broadcaster, deploymentID, "info", "Setting up SSH private key secret...", "github")
 	if err := ds.setGitHubSecret(owner, repo, "SSH_PRIVATE_KEY", privateKey, req.GithubToken, publicKey); err != nil {
+		ds.broadcastLog(broadcaster, deploymentID, "error", fmt.Sprintf("Failed to set SSH private key secret: %v", err), "github")
 		return fmt.Errorf("failed to set SSH private key secret: %v", err)
 	}
-	
-	for key, value := range req.EnvVariables {
-		secretName := fmt.Sprintf("ENV_%s", strings.ToUpper(key))
-		if err := ds.setGitHubSecret(owner, repo, secretName, value, req.GithubToken, publicKey); err != nil {
-			log.Printf("Warning: failed to set environment variable secret %s: %v", secretName, err)
+	ds.broadcastLog(broadcaster, deploymentID, "success", "SSH private key secret configured", "github")
+
+	if len(req.EnvVariables) > 0 {
+		ds.broadcastLog(broadcaster, deploymentID, "info", "Setting up environment variable secrets...", "github")
+		for key, value := range req.EnvVariables {
+			secretName := fmt.Sprintf("ENV_%s", strings.ToUpper(key))
+			ds.broadcastLog(broadcaster, deploymentID, "info", fmt.Sprintf("Setting secret: %s", secretName), "github")
+			if err := ds.setGitHubSecret(owner, repo, secretName, value, req.GithubToken, publicKey); err != nil {
+				msg := fmt.Sprintf("Failed to set environment variable secret %s: %v", secretName, err)
+				ds.broadcastLog(broadcaster, deploymentID, "warn", msg, "github")
+				log.Printf("Warning: %s", msg)
+			} else {
+				ds.broadcastLog(broadcaster, deploymentID, "success", fmt.Sprintf("Secret %s configured successfully", secretName), "github")
+			}
 		}
 	}
-	
-	log.Printf("Successfully configured GitHub secrets for repository %s/%s", owner, repo)
+
+	ds.broadcastLog(broadcaster, deploymentID, "success", fmt.Sprintf("GitHub secrets configured for %s/%s", owner, repo), "github")
 	return nil
 }
 
-func (ds *DeploymentService) createGitHubActionsWorkflow(workDir string, req *DeploymentRequest, publicIP string) error {
+func (ds *DeploymentService) createGitHubActionsWorkflow(workDir string, req *DeploymentRequest, publicIP string, broadcaster LogBroadcaster, deploymentID string) error {
+	ds.broadcastLog(broadcaster, deploymentID, "info", "Creating GitHub Actions workflow directory...", "github")
 	workflowDir := filepath.Join(workDir, "github-actions")
 	if err := os.MkdirAll(workflowDir, 0755); err != nil {
+		ds.broadcastLog(broadcaster, deploymentID, "error", fmt.Sprintf("Failed to create workflow directory: %v", err), "github")
 		return fmt.Errorf("failed to create workflow directory: %v", err)
 	}
+	ds.broadcastLog(broadcaster, deploymentID, "success", "Workflow directory created successfully", "github")
 
 	workflowContent := fmt.Sprintf(`name: Auto Deploy Django Application
 
@@ -309,10 +330,13 @@ jobs:
 %s
 `, publicIP, ds.generateEnvExports(req.EnvVariables), ds.generateAdditionalCommands(req.AdditionalCommands), ds.generateEnvSecrets(req.EnvVariables))
 
+	ds.broadcastLog(broadcaster, deploymentID, "info", "Writing GitHub Actions workflow file...", "github")
 	workflowPath := filepath.Join(workflowDir, "deploy.yml")
 	if err := os.WriteFile(workflowPath, []byte(workflowContent), 0644); err != nil {
+		ds.broadcastLog(broadcaster, deploymentID, "error", fmt.Sprintf("Failed to write workflow file: %v", err), "github")
 		return fmt.Errorf("failed to write workflow file: %v", err)
 	}
+	ds.broadcastLog(broadcaster, deploymentID, "success", "GitHub Actions workflow file created successfully", "github")
 
 	return nil
 }
@@ -348,37 +372,45 @@ func (ds *DeploymentService) generateAdditionalCommands(additionalCommands []str
 	return commands.String()
 }
 
-func (ds *DeploymentService) setupGitHubActionsOnServer(ansibleDir string, req *DeploymentRequest, publicIP string, terraformDir string) error {
+func (ds *DeploymentService) setupGitHubActionsOnServer(ansibleDir string, req *DeploymentRequest, publicIP string, terraformDir string, broadcaster LogBroadcaster, deploymentID string) error {
 	if !req.AutoDeploy {
-		return nil 
+		return nil
 	}
+
+	ds.broadcastLog(broadcaster, deploymentID, "info", "Reading SSH keys for GitHub Actions setup...", "github")
 
 	privateKeyPath := filepath.Join(terraformDir, "azure_vm_key")
 	publicKeyPath := filepath.Join(terraformDir, "azure_vm_key.pub")
 
 	privateKeyBytes, err := os.ReadFile(privateKeyPath)
 	if err != nil {
+		ds.broadcastLog(broadcaster, deploymentID, "error", fmt.Sprintf("Failed to read private key: %v", err), "github")
 		return fmt.Errorf("failed to read existing private key from %s: %v", privateKeyPath, err)
 	}
 	privateKey := string(privateKeyBytes)
 
 	publicKeyBytes, err := os.ReadFile(publicKeyPath)
 	if err != nil {
+		ds.broadcastLog(broadcaster, deploymentID, "error", fmt.Sprintf("Failed to read public key: %v", err), "github")
 		return fmt.Errorf("failed to read existing public key from %s: %v", publicKeyPath, err)
 	}
 	publicKey := strings.TrimSpace(string(publicKeyBytes))
 
-	if err := ds.setupGitHubSecrets(req, privateKey); err != nil {
+	ds.broadcastLog(broadcaster, deploymentID, "success", "SSH keys read successfully", "github")
+
+	if err := ds.setupGitHubSecrets(req, privateKey, broadcaster, deploymentID); err != nil {
 		return fmt.Errorf("failed to setup GitHub secrets: %v", err)
 	}
 
 	workDir := filepath.Dir(ansibleDir)
-	if err := ds.createGitHubActionsWorkflow(workDir, req, publicIP); err != nil {
+	ds.broadcastLog(broadcaster, deploymentID, "info", "Creating GitHub Actions workflow file...", "github")
+	if err := ds.createGitHubActionsWorkflow(workDir, req, publicIP, broadcaster, deploymentID); err != nil {
 		return fmt.Errorf("failed to create GitHub Actions workflow: %v", err)
 	}
 
+	ds.broadcastLog(broadcaster, deploymentID, "info", "Creating GitHub Actions Ansible tasks file...", "github")
 	additionalTasksPath := filepath.Join(ansibleDir, "github-actions-setup.yml")
-	
+
 	additionalTasksContent := fmt.Sprintf(`---
 - name: Setup GitHub Actions Auto-Deploy
   hosts: django_servers
@@ -474,10 +506,11 @@ func (ds *DeploymentService) setupGitHubActionsOnServer(ansibleDir string, req *
 `, strings.TrimSpace(publicKey), req.RepoURL, req.GithubToken)
 
 	if err := os.WriteFile(additionalTasksPath, []byte(additionalTasksContent), 0644); err != nil {
+		ds.broadcastLog(broadcaster, deploymentID, "error", fmt.Sprintf("Failed to write GitHub Actions setup tasks: %v", err), "github")
 		return fmt.Errorf("failed to write additional tasks file: %v", err)
 	}
 
-	log.Printf("GitHub Actions setup configured using existing SSH keys from Terraform")
+	ds.broadcastLog(broadcaster, deploymentID, "success", "GitHub Actions setup configured using existing SSH keys", "github")
 	return nil
 }
 
@@ -496,16 +529,89 @@ func (ds *DeploymentService) setupGitHubActionsOnServer(ansibleDir string, req *
 // 	return strings.Join(result, "\n")
 // }
 
-func (ds *DeploymentService) runAdditionalAnsibleTasks(ansibleDir string) error {
+func (ds *DeploymentService) runAdditionalAnsibleTasks(ansibleDir string, broadcaster LogBroadcaster, deploymentID string) error {
 	additionalTasksPath := filepath.Join(ansibleDir, "github-actions-setup.yml")
 	if _, err := os.Stat(additionalTasksPath); os.IsNotExist(err) {
-		return nil 
+		ds.broadcastLog(broadcaster, deploymentID, "info", "No additional GitHub Actions tasks found", "github")
+		return nil
 	}
 
-	log.Println("Running GitHub Actions setup tasks...")
+	ds.broadcastLog(broadcaster, deploymentID, "info", "Running GitHub Actions setup tasks...", "github")
 	cmd := exec.Command("ansible-playbook", "-i", "inventory.ini", "github-actions-setup.yml", "-v")
 	cmd.Dir = ansibleDir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+
+	// Set up pipes for stdout and stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdout pipe: %v", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stderr pipe: %v", err)
+	}
+
+	// Start command
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start command: %v", err)
+	}
+
+	// Create a channel to coordinate between stdout and stderr goroutines
+	done := make(chan bool)
+
+	// Handle stdout in a goroutine
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			// Try to parse the line based on common Ansible output patterns
+			switch {
+			case strings.Contains(line, "TASK ["):
+				// Extract task name and send as info
+				taskName := strings.TrimPrefix(strings.TrimSuffix(strings.TrimPrefix(line, "TASK ["), "]"), " ")
+				ds.broadcastLog(broadcaster, deploymentID, "info", fmt.Sprintf("GitHub Actions setup: %s", taskName), "github")
+			case strings.Contains(line, "ok: ["):
+				// Extract successful task result
+				ds.broadcastLog(broadcaster, deploymentID, "success", line, "github")
+			case strings.Contains(line, "changed: ["):
+				// Extract changed task result
+				ds.broadcastLog(broadcaster, deploymentID, "info", line, "github")
+			case strings.Contains(line, "skipping: ["):
+				// Extract skipped task result
+				ds.broadcastLog(broadcaster, deploymentID, "info", line, "github")
+			default:
+				// Send other output as debug level if it's not empty
+				if strings.TrimSpace(line) != "" {
+					ds.broadcastLog(broadcaster, deploymentID, "debug", line, "github")
+				}
+			}
+		}
+		done <- true
+	}()
+
+	// Handle stderr in a goroutine
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.Contains(line, "ERROR!") || strings.Contains(line, "failed:") {
+				ds.broadcastLog(broadcaster, deploymentID, "error", line, "github")
+			} else {
+				ds.broadcastLog(broadcaster, deploymentID, "warn", line, "github")
+			}
+		}
+		done <- true
+	}()
+
+	// Wait for both stdout and stderr to be processed
+	<-done
+	<-done
+
+	// Wait for command to complete
+	if err := cmd.Wait(); err != nil {
+		ds.broadcastLog(broadcaster, deploymentID, "error", fmt.Sprintf("GitHub Actions setup tasks failed: %v", err), "github")
+		return fmt.Errorf("GitHub Actions setup tasks failed: %v", err)
+	}
+
+	ds.broadcastLog(broadcaster, deploymentID, "success", "GitHub Actions setup tasks completed successfully", "github")
+	return nil
 }
