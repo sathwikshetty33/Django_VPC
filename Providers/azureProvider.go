@@ -54,7 +54,6 @@ func (a *AzureProvider) SetLogger(broadcaster LogBroadcaster, deploymentID strin
 }
 
 func (a *AzureProvider) broadcastLog(level, message, step string) {
-	// Create log message
 	logMsg := LogMessage{
 		Level:     level,
 		Message:   message,

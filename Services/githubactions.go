@@ -256,6 +256,12 @@ func (ds *DeploymentService) createGitHubActionsWorkflow(workDir string, req *De
 	}
 	ds.broadcastLog(broadcaster, deploymentID, "success", "Workflow directory created successfully", "github")
 
+	// Generate env section - only include if there are environment variables
+	envSection := ""
+	if len(req.EnvVariables) > 0 {
+		envSection = fmt.Sprintf("      env:\n%s", ds.generateEnvSecrets(req.EnvVariables))
+	}
+
 	workflowContent := fmt.Sprintf(`name: Auto Deploy Django Application
 
 on:
@@ -326,9 +332,7 @@ jobs:
           sudo supervisorctl status django-server
           
           echo "Auto-deployment completed!"
-      env:
-%s
-`, publicIP, ds.generateEnvExports(req.EnvVariables), ds.generateAdditionalCommands(req.AdditionalCommands), ds.generateEnvSecrets(req.EnvVariables))
+%s`, publicIP, ds.generateEnvExports(req.EnvVariables), ds.generateAdditionalCommands(req.AdditionalCommands), envSection)
 
 	ds.broadcastLog(broadcaster, deploymentID, "info", "Writing GitHub Actions workflow file...", "github")
 	workflowPath := filepath.Join(workflowDir, "deploy.yml")
@@ -340,7 +344,6 @@ jobs:
 
 	return nil
 }
-
 func (ds *DeploymentService) generateEnvExports(envVars map[string]string) string {
 	var exports strings.Builder
 	for key, _ := range envVars {
@@ -351,6 +354,10 @@ func (ds *DeploymentService) generateEnvExports(envVars map[string]string) strin
 }
 
 func (ds *DeploymentService) generateEnvSecrets(envVars map[string]string) string {
+	if len(envVars) == 0 {
+		return "        # No environment variables configured"
+	}
+	
 	var secrets strings.Builder
 	for key, _ := range envVars {
 		secretName := fmt.Sprintf("ENV_%s", strings.ToUpper(key))
